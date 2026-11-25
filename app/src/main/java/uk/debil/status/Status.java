@@ -29,7 +29,34 @@ final class Status {
 
     static Status preview() { return ok("21:47"); }
 
-    private int downCount() {
+    /** Accent colour (ARGB) for the list screen. */
+    int color() {
+        switch (kind) {
+            case OK: return 0xFF66DD88;
+            case PROBLEMS: return downCount() > 0 ? 0xFFFF6E6E : 0xFFFFC566;
+            case OFFLINE: return 0xFFB0B0B0;
+            default: return 0xFFFFC566;
+        }
+    }
+
+    /** Lines for the full list: every problem label, or a single explanation line. */
+    List<String> detailLines() {
+        List<String> lines = new ArrayList<>();
+        if (kind == Kind.PROBLEMS) lines.addAll(problems);
+        else if (kind != Kind.OK) lines.add(longText());
+        return lines;
+    }
+
+    /** Footer under the list, e.g. "Checked 20:17" or "Last update 20:14". */
+    String footer() {
+        switch (kind) {
+            case STALE: return checkedAt.isEmpty() ? "" : "Last update " + checkedAt;
+            case OFFLINE: return "No connection";
+            default: return checkedAt.isEmpty() ? "" : "Checked " + checkedAt;
+        }
+    }
+
+    int downCount() {
         int n = 0;
         for (String p : problems) if (p.endsWith(" DOWN")) n++;
         return n;

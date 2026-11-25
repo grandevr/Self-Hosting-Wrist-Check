@@ -26,15 +26,22 @@
             <meta-data
                 android:name="android.support.wearable.complications.SUPPORTED_TYPES"
                 android:value="SHORT_TEXT,LONG_TEXT" />
-            <!-- Refresh every 15 minutes; tapping the complication refreshes immediately -->
+            <!-- Refresh every 15 minutes; tapping the complication opens the list and refreshes -->
             <meta-data
                 android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
                 android:value="900" />
         </service>
 
-        <!-- Tap on the complication -> request an immediate update -->
-        <receiver
-            android:name=".RefreshReceiver"
-            android:exported="false" />
+        <!-- Scrollable full list of problems: opened by tapping the complication (or from the app list) -->
+        <activity
+            android:name=".ProblemsActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

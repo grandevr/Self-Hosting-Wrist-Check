@@ -5,5 +5,6 @@ complicationsDataSource = "1.2.1"
 [libraries]
 wear-complications-data-source = { group = "androidx.wear.watchface", name = "watchface-complications-data-source", version.ref = "complicationsDataSource" }
 
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }

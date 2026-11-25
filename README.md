@@ -1,6 +1,11 @@
 # Self-Hosting Wrist Check
 
-A tiny standalone Wear OS app (Java, no launcher activity) whose only job is one complication data source, **Homelab status**. It reads `status.json` from the homelab and shows it on the watch face. Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30).
+A tiny standalone Wear OS app (Java) that reads `status.json` from the homelab and shows it on the watch:
+
+- **Homelab status** complication for the watch face.
+- Tap the complication to open a scrollable list of everything that's down or slow. Opening it also refreshes the complication.
+
+Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30).
 
 ## What it shows
 
@@ -14,8 +19,14 @@ A tiny standalone Wear OS app (Java, no launcher activity) whose only job is one
 | fetch failed / non-200 | `OFFLINE` | `NO CONNECTION` | `Server unreachable` | `Homelab` |
 
 - Both types carry a monochrome server icon.
-- Refreshes every 15 minutes (`UPDATE_PERIOD_SECONDS` 900). Tapping the complication refreshes right away (`RefreshReceiver` calls `ComplicationDataSourceUpdateRequester.requestUpdateAll()`).
+- Refreshes every 15 minutes (`UPDATE_PERIOD_SECONDS` 900). Opening the problem list (by tapping the complication) refreshes it right away via `ComplicationDataSourceUpdateRequester.requestUpdateAll()`.
 - Fetch: `GET STATUS_URL` with `Authorization: Bearer STATUS_TOKEN`, 8 s connect/read timeouts, response capped at 16 KB. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
+
+## Problem list
+
+- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a **Refresh** button. It is also in the watch's app list.
+- Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
+- Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
 
 ## Build
 
@@ -55,7 +66,8 @@ app/src/main/java/uk/debil/status/
   StatusDataSource.java   complication service, builds SHORT_TEXT / LONG_TEXT data
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
-  RefreshReceiver.java    tap-to-refresh
+  ProblemsActivity.java   scrollable full list, opened by tapping the complication
+  Refresh.java            asks Wear OS to update the complication now
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 secrets.properties.example
