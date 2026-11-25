@@ -84,8 +84,7 @@ public class StatusDataSource extends ComplicationDataSourceService {
     }
 
     private static PendingIntent tapIntent(Context ctx) {
-        Intent intent = new Intent(ctx, ProblemsActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        Intent intent = new Intent(ctx, ProblemsActivity.class);
         return PendingIntent.getActivity(ctx, 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
