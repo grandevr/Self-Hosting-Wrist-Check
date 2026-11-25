@@ -32,6 +32,33 @@
                 android:value="900" />
         </service>
 
+        <!-- Tile: as many problems as fit, then "+N more"; tap opens ProblemsActivity -->
+        <service
+            android:name=".StatusTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_server"
+            android:label="@string/tile_label"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data
+                android:name="androidx.wear.tiles.PREVIEW"
+                android:resource="@drawable/tile_preview" />
+        </service>
+
+        <!-- Scrollable full list of problems (from the tile or the app list) -->
+        <activity
+            android:name=".ProblemsActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- Tap on the complication -> request an immediate update -->
         <receiver
             android:name=".RefreshReceiver"

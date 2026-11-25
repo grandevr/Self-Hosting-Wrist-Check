@@ -1,6 +1,11 @@
 # Self-Hosting Wrist Check
 
-A tiny standalone Wear OS app (Java, no launcher activity) whose only job is one complication data source, **Homelab status**. It reads `status.json` from the homelab and shows it on the watch face. Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30).
+A tiny standalone Wear OS app (Java) that reads `status.json` from the homelab and shows it on the watch:
+
+- **Homelab status** complication for the watch face. Tap it to refresh.
+- **Homelab problems** tile listing what's down or slow. Tap it to open the full, scrollable list.
+
+Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30).
 
 ## What it shows
 
@@ -16,6 +21,13 @@ A tiny standalone Wear OS app (Java, no launcher activity) whose only job is one
 - Both types carry a monochrome server icon.
 - Refreshes every 15 minutes (`UPDATE_PERIOD_SECONDS` 900). Tapping the complication refreshes right away (`RefreshReceiver` calls `ComplicationDataSourceUpdateRequester.requestUpdateAll()`).
 - Fetch: `GET STATUS_URL` with `Authorization: Bearer STATUS_TOKEN`, 8 s connect/read timeouts, response capped at 16 KB. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
+
+## Tile and problem list
+
+- The tile shows the status (`ALL UP`, `2 DOWN`, ...) and as many problem labels as fit on the screen (about 4 on a 480x480 watch), then `+N more`, with the check time at the bottom. It refreshes every 15 minutes and whenever the complication is tapped.
+- Tapping the tile opens the **debil status** screen: every problem in a scrollable list (touch or rotating bezel) with a **Refresh** button. It is also in the watch's app list. Opening it refreshes the complication and tile too.
+- Add the tile: swipe left from the watch face to the end of the tiles, tap **+**, and pick **Homelab problems** (or Galaxy Wearable app → Tiles).
+- Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing), which is why the list lives on the tile.
 
 ## Build
 
@@ -55,7 +67,10 @@ app/src/main/java/uk/debil/status/
   StatusDataSource.java   complication service, builds SHORT_TEXT / LONG_TEXT data
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
+  StatusTileService.java  tile: status + problems that fit, "+N more"
+  ProblemsActivity.java   scrollable full list, opened from the tile
   RefreshReceiver.java    tap-to-refresh
+  Refresh.java            asks Wear OS to update complication and tile
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 secrets.properties.example

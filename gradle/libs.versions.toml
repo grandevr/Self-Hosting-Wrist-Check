@@ -1,9 +1,16 @@
 [versions]
 androidGradlePlugin = "9.0.0"
 complicationsDataSource = "1.2.1"
+tiles = "1.6.2"
+protolayout = "1.4.2"
+concurrentFutures = "1.3.0"
 
 [libraries]
 wear-complications-data-source = { group = "androidx.wear.watchface", name = "watchface-complications-data-source", version.ref = "complicationsDataSource" }
+
+wear-tiles = { group = "androidx.wear.tiles", name = "tiles", version.ref = "tiles" }
+wear-protolayout = { group = "androidx.wear.protolayout", name = "protolayout", version.ref = "protolayout" }
+concurrent-futures = { group = "androidx.concurrent", name = "concurrent-futures", version.ref = "concurrentFutures" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }
