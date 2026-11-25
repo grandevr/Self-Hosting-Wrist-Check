@@ -53,7 +53,4 @@ android {
 
 dependencies {
     implementation(libs.wear.complications.data.source)
-    implementation(libs.wear.tiles)
-    implementation(libs.wear.protolayout)
-    implementation(libs.concurrent.futures)
 }

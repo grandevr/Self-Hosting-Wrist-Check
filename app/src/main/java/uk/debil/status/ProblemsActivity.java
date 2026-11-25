@@ -16,8 +16,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Scrollable list of everything that's down or slow. Opened from the tile (or the app list).
- * Tap "Refresh" to fetch again; scrolls with touch or the rotating bezel.
+ * Scrollable list of everything that's down or slow. Opened by tapping the complication (or from
+ * the app list). Opening it, or tapping "Refresh", also refreshes the complication right away.
+ * Scrolls with touch or the rotating bezel.
  */
 public class ProblemsActivity extends Activity {
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
@@ -59,13 +60,13 @@ public class ProblemsActivity extends Activity {
     private void load() {
         if (loading) return;
         loading = true;
+        Refresh.complication(getApplicationContext());
         EXECUTOR.execute(() -> {
             Status s = StatusFetcher.fetch();
             main.post(() -> {
                 loading = false;
                 if (isFinishing() || isDestroyed()) return;
                 show(s);
-                Refresh.all(getApplicationContext()); // keep complication and tile in sync
             });
         });
     }

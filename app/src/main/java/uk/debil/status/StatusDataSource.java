@@ -28,7 +28,7 @@ import java.util.concurrent.Executors;
  * SHORT_TEXT: text "ALL UP" / "2 DOWN" / "SLOW" / "STALE" / "OFFLINE" / "KUMA",
  *             title = check time (HH:MM) when all is up, otherwise the first problem's service name.
  * LONG_TEXT:  text "All up" or the first problem label, title "+N more" or "Checked HH:MM".
- * Tapping the complication fetches again immediately.
+ * Tapping the complication opens ProblemsActivity (full list), which also refreshes the complication.
  */
 public class StatusDataSource extends ComplicationDataSourceService {
     private static final String TAG = "DebilStatus";
@@ -84,8 +84,9 @@ public class StatusDataSource extends ComplicationDataSourceService {
     }
 
     private static PendingIntent tapIntent(Context ctx) {
-        Intent intent = new Intent(ctx, RefreshReceiver.class);
-        return PendingIntent.getBroadcast(ctx, 0, intent,
+        Intent intent = new Intent(ctx, ProblemsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        return PendingIntent.getActivity(ctx, 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 }

@@ -29,7 +29,7 @@ final class Status {
 
     static Status preview() { return ok("21:47"); }
 
-    /** Accent colour (ARGB) for the tile and the list screen. */
+    /** Accent colour (ARGB) for the list screen. */
     int color() {
         switch (kind) {
             case OK: return 0xFF66DD88;

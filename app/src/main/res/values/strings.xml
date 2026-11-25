@@ -2,5 +2,4 @@
 <resources>
     <string name="app_name">debil status</string>
     <string name="complication_label">Homelab status</string>
-    <string name="tile_label">Homelab problems</string>
 </resources>

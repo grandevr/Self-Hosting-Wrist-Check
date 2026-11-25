@@ -26,28 +26,13 @@
             <meta-data
                 android:name="android.support.wearable.complications.SUPPORTED_TYPES"
                 android:value="SHORT_TEXT,LONG_TEXT" />
-            <!-- Refresh every 15 minutes; tapping the complication refreshes immediately -->
+            <!-- Refresh every 15 minutes; tapping the complication opens the list and refreshes -->
             <meta-data
                 android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
                 android:value="900" />
         </service>
 
-        <!-- Tile: as many problems as fit, then "+N more"; tap opens ProblemsActivity -->
-        <service
-            android:name=".StatusTileService"
-            android:exported="true"
-            android:icon="@drawable/ic_server"
-            android:label="@string/tile_label"
-            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
-            <intent-filter>
-                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
-            </intent-filter>
-            <meta-data
-                android:name="androidx.wear.tiles.PREVIEW"
-                android:resource="@drawable/tile_preview" />
-        </service>
-
-        <!-- Scrollable full list of problems (from the tile or the app list) -->
+        <!-- Scrollable full list of problems: opened by tapping the complication (or from the app list) -->
         <activity
             android:name=".ProblemsActivity"
             android:exported="true"
@@ -58,10 +43,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Tap on the complication -> request an immediate update -->
-        <receiver
-            android:name=".RefreshReceiver"
-            android:exported="false" />
     </application>
 </manifest>
