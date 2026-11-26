@@ -11,13 +11,16 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Scrollable list of everything that's down or slow, then (if the server sends them) what's up. Opened by tapping the complication (or from
- * the app list). Opening it, or tapping "Refresh", also refreshes the complication right away.
+ * Scrollable list of everything that's down or slow, then (if the server sends them) what's up.
+ * If status.json has "groups", shows collapsible categories instead ("Media / UP 3 • DOWN 1").
+ * Opened by tapping the complication (or from the app list). Opening it, or tapping "Refresh", also refreshes the complication right away.
  * Scrolls with touch or the rotating bezel.
  */
 public class ProblemsActivity extends Activity {
@@ -29,6 +32,9 @@ public class ProblemsActivity extends Activity {
     private ScrollView scroll;
     private LinearLayout list;
     private boolean loading;
+    /** Categories the user opened or closed by hand, so a refresh keeps their choice. */
+    private final Set<String> expanded = new HashSet<>();
+    private final Set<String> collapsed = new HashSet<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -77,6 +83,76 @@ public class ProblemsActivity extends Activity {
         list.addView(label("HOMELAB", 12, GREY, false));
         list.addView(label(s.shortText(), 26, s.color(), true));
 
+        if (!s.groups.isEmpty()) {
+            for (Group g : s.groups) addGroup(g);
+        } else {
+            addFlatList(s);
+        }
+
+        String footer = s.footer();
+        if (!footer.isEmpty()) {
+            TextView f = label(footer, 12, GREY, false);
+            f.setPadding(0, dp(8), 0, 0);
+            list.addView(f);
+        }
+
+        TextView refresh = label("Refresh", 15, 0xFF8AB4F8, true);
+        refresh.setPadding(dp(16), dp(12), dp(16), dp(12));
+        refresh.setOnClickListener(v -> {
+            showMessage("Loading…");
+            load();
+        });
+        list.addView(refresh);
+        scroll.scrollTo(0, 0);
+    }
+
+    /** A category row ("▸ Media" / "UP 3 • DOWN 1") that expands to its services on tap. */
+    private void addGroup(Group g) {
+        boolean hasProblems = !g.problems.isEmpty();
+        boolean open = expanded.contains(g.name) || (hasProblems && !collapsed.contains(g.name));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(0, dp(8), 0, dp(8));
+        header.setClickable(true);
+        header.setFocusable(true);
+        TextView title = label((open ? "▾ " : "▸ ") + g.name, 16, 0xFFFFFFFF, true);
+        int summaryColor = g.downCount() > 0 ? 0xFFFF6E6E : g.slowCount() > 0 ? 0xFFFFC566 : UP_GREEN;
+        TextView summary = label(g.summary(), 12, summaryColor, false);
+        header.addView(title);
+        header.addView(summary);
+        header.setContentDescription(g.name + ", " + g.summary());
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(0, 0, 0, dp(6));
+        for (String p : g.problems) {
+            int c = p.endsWith(" DOWN") ? 0xFFFF6E6E : 0xFFFFC566;
+            TextView row = label(p, 15, c, false);
+            row.setPadding(0, dp(4), 0, dp(4));
+            body.addView(row);
+        }
+        for (String name : g.up) {
+            TextView row = label(name, 15, UP_GREEN, false);
+            row.setPadding(0, dp(4), 0, dp(4));
+            body.addView(row);
+        }
+        body.setVisibility(open ? View.VISIBLE : View.GONE);
+
+        header.setOnClickListener(v -> {
+            boolean nowOpen = body.getVisibility() != View.VISIBLE;
+            body.setVisibility(nowOpen ? View.VISIBLE : View.GONE);
+            title.setText((nowOpen ? "▾ " : "▸ ") + g.name);
+            if (nowOpen) { expanded.add(g.name); collapsed.remove(g.name); }
+            else { collapsed.add(g.name); expanded.remove(g.name); }
+        });
+
+        list.addView(header);
+        list.addView(body);
+    }
+
+    /** No categories from the server: problems, then working services. */
+    private void addFlatList(Status s) {
         List<String> lines = s.detailLines();
         if (lines.isEmpty() && s.up.isEmpty() && s.kind == Status.Kind.OK) {
             list.addView(label("Everything is up", 15, 0xFFFFFFFF, false));
@@ -97,22 +173,6 @@ public class ProblemsActivity extends Activity {
                 list.addView(row);
             }
         }
-
-        String footer = s.footer();
-        if (!footer.isEmpty()) {
-            TextView f = label(footer, 12, GREY, false);
-            f.setPadding(0, dp(8), 0, 0);
-            list.addView(f);
-        }
-
-        TextView refresh = label("Refresh", 15, 0xFF8AB4F8, true);
-        refresh.setPadding(dp(16), dp(12), dp(16), dp(12));
-        refresh.setOnClickListener(v -> {
-            showMessage("Loading…");
-            load();
-        });
-        list.addView(refresh);
-        scroll.scrollTo(0, 0);
     }
 
     private void showMessage(String message) {

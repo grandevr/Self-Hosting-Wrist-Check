@@ -73,6 +73,19 @@ final class StatusFetcher {
                 : Status.problems(problems, checkedAt);
         // Optional: names of working services. Older status.json without it still works.
         status.up.addAll(strings(json.optJSONArray("up")));
+        // Optional: categories, each {"name": ..., "problems": [...], "up": [...]}.
+        JSONArray groups = json.optJSONArray("groups");
+        if (groups != null) {
+            for (int i = 0; i < groups.length(); i++) {
+                JSONObject g = groups.optJSONObject(i);
+                if (g == null) continue;
+                String name = g.optString("name", "").trim();
+                Group group = new Group(name.isEmpty() ? "Other" : name);
+                group.problems.addAll(strings(g.optJSONArray("problems")));
+                group.up.addAll(strings(g.optJSONArray("up")));
+                status.groups.add(group);
+            }
+        }
         return status;
     }
 
