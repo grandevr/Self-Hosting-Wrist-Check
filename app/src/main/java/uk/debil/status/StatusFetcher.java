@@ -1,6 +1,7 @@
 package uk.debil.status;
 
 import android.content.Context;
+import android.os.SystemClock;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -27,8 +28,22 @@ final class StatusFetcher {
 
     private StatusFetcher() {}
 
-    /** Fetches with the configured URL and token. Returns Status.setup() if the app isn't set up. */
+    // Last result, so a burst of requests (both complication types, a watch face rebinding, the
+    // list screen and the complication refreshing together) costs one network request, not several.
+    private static Status lastStatus;
+    private static long lastAtMs;      // SystemClock.elapsedRealtime() of lastStatus
+    private static String lastKey;     // URL + token it was fetched with (memory only)
+
+    /** Always asks the server. Returns Status.setup() if the app isn't set up. */
     static Status fetch(Context ctx) {
+        return fetch(ctx, 0);
+    }
+
+    /**
+     * Returns the last result if it is younger than maxAgeMs and was fetched with the current
+     * URL and token, otherwise asks the server. Concurrent callers wait for one request.
+     */
+    static synchronized Status fetch(Context ctx, long maxAgeMs) {
         Config.Creds creds;
         try {
             creds = Config.load(ctx);
@@ -37,7 +52,16 @@ final class StatusFetcher {
             return Status.offline();
         }
         if (creds == null) return Status.setup();
-        return check(creds.url, creds.token).status;
+        String key = creds.url + "\n" + creds.token;
+        long now = SystemClock.elapsedRealtime();
+        if (lastStatus != null && key.equals(lastKey) && now - lastAtMs < maxAgeMs) {
+            return lastStatus;
+        }
+        Status s = check(creds.url, creds.token).status;
+        lastStatus = s;
+        lastKey = key;
+        lastAtMs = SystemClock.elapsedRealtime();
+        return s;
     }
 
     /** Result of one request: the Status to show, plus a message for the setup screens. */

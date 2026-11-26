@@ -259,6 +259,28 @@ On the Galaxy Wearable phone app the same thing is under Watch faces → Customi
 
 Logs: `adb logcat -s DebilStatus`
 
+## Battery use
+
+The app has no background service, wake lock, alarm or scheduled job. Wear OS asks the
+complication for data every 15 minutes, and each ask is one small HTTPS request (8-second
+timeouts, at most 32 KB). Requests that arrive close together (both complication types, a watch
+face rebinding, the list screen opening) share one result for up to a minute. The setup screen
+turns Wi-Fi on and keeps the screen awake only while it is open, for at most 10 minutes.
+
+To see what the app costs on your watch (with adb connected):
+
+```
+adb shell dumpsys batterystats --reset        # start counting now, then wear the watch a few hours
+adb shell dumpsys batterystats uk.debil.status | grep -iE "wake|network|mobile|wifi|cpu|Estimated power"
+adb shell dumpsys batterystats | grep -A40 "Estimated power use"   # who used the battery
+adb shell dumpsys alarm | grep -i debil       # expect nothing
+adb shell dumpsys jobscheduler | grep -i debil  # expect nothing
+adb shell dumpsys power | grep -i -A2 "wake locks"  # expect nothing from uk.debil.status
+```
+
+Leaving wireless debugging switched on keeps the watch's Wi-Fi up all day and drains the battery
+quickly, so turn it off in Developer options after installing.
+
 ## Files
 
 ```

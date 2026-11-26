@@ -66,7 +66,7 @@ class ProblemsActivity : ComponentActivity() {
                     loading = loading,
                     isOpen = { g -> toggled[g.name] ?: g.problems.isNotEmpty() },
                     onToggle = { g, open -> toggled[g.name] = !open },
-                    onRefresh = { load() },
+                    onRefresh = { load(force = true) },
                     onSettings = { startActivity(Intent(this, SetupActivity::class.java)) },
                 )
             }
@@ -75,15 +75,20 @@ class ProblemsActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        load()
+        // Coming back from ambient or another screen within half a minute reuses the last result.
+        load(force = false)
     }
 
-    private fun load() {
+    /**
+     * Fetches once, then lets the complication pick up the same result (it reuses anything
+     * younger than a minute), so opening the list costs one request, not two.
+     */
+    private fun load(force: Boolean) {
         if (loading) return
         loading = true
-        Refresh.complication(applicationContext)
         EXECUTOR.execute {
-            val s = StatusFetcher.fetch(applicationContext)
+            val s = StatusFetcher.fetch(applicationContext, if (force) 0L else RESUME_REUSE_MS)
+            Refresh.complication(applicationContext)
             runOnUiThread {
                 loading = false
                 if (!isFinishing && !isDestroyed) status = s
@@ -93,6 +98,7 @@ class ProblemsActivity : ComponentActivity() {
 
     private companion object {
         val EXECUTOR = Executors.newSingleThreadExecutor()
+        const val RESUME_REUSE_MS = 30_000L
     }
 }
 
