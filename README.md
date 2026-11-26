@@ -279,6 +279,8 @@ Android only installs an update over an existing app if both are signed with the
 
 `keystore.properties`, `*.jks` and `*.keystore` are gitignored. Without `keystore.properties`, release builds are signed with the machine's debug key (`~/.android/debug.keystore`), which is stable on one computer but differs between computers. If `keystore.properties` exists but a value is missing, the build stops with a clear error.
 
+**Builds on GitHub.** Every push runs the Build workflow, which uploads the release APK as the `wrist-check-release` artifact (open the run under **Actions** and download it at the bottom). To sign it with your key, add four repository secrets under Settings → Secrets and variables → Actions: `KEYSTORE_BASE64` (the keystore file as one line of base64: `base64 -w0 wrist-check.jks`), `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`. Without them the artifact is signed with the runner's throwaway debug key and won't install over your own builds. The workflow never has `secrets.properties`, so the APK holds no token.
+
 If the watch still has an APK signed with a different key, uninstall it once (`adb uninstall uk.debil.status`) before installing; after that, updates install with `-r`.
 
 Optional build-time default: copy `secrets.properties.example` to `secrets.properties` and fill in `STATUS_URL` and `STATUS_TOKEN`. The app then works without any watch setup, until something is entered on the watch (which wins). If the file exists, both values must be filled in or the build stops with a clear error. An APK built this way contains the token: don't share or commit it (both are gitignored). The GitHub Actions workflow builds without the file.
