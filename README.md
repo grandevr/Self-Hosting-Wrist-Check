@@ -1,6 +1,6 @@
 # Self-Hosting Wrist Check
 
-A tiny standalone Wear OS app (Java) that reads `status.json` from the homelab and shows it on the watch:
+A tiny standalone Wear OS app (Java, with the screens in Kotlin and Compose for Wear OS Material 3) that reads `status.json` from the homelab and shows it on the watch:
 
 - **Homelab status** complication for the watch face.
 - Tap the complication to open a scrollable list of everything that's down or slow. Opening it also refreshes the complication.
@@ -27,7 +27,8 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 
 ## Problem list
 
-- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a **Refresh** button. It is also in the watch's app list.
+- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a round **Refresh** button at the bottom edge. It is also in the watch's app list.
+- The screens use Material 3 for Wear OS and pick up the watch's dynamic colours (Wear OS 6 takes them from the watch face). Status colours stay fixed: green for up, amber for slow, red for down.
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
 
@@ -77,7 +78,7 @@ Not using Caddy? Any web server works if it answers 200 with the file for `Autho
 3. Scan the QR code with your phone (or type the address into any browser on the same network). The page has the PIN filled in; paste the status URL and token and press **Test and save**.
 4. The watch fetches the URL with the token first and only saves if it gets a valid `status.json`, so you see "wrong token" or "can't reach server" right on the page. The complication updates straight away.
 
-No Wi-Fi, or a different network? Tap **Enter on watch** and type the URL and token on the watch (the Wear OS keyboard can take input from the paired phone, which helps with the long token).
+No Wi-Fi, or a different network? Tap the keyboard button at the bottom edge (**Enter on watch**) and type the URL and token on the watch (the Wear OS keyboard can take input from the paired phone, which helps with the long token).
 
 To change the URL or token later: open the status list (tap the complication) → **Settings** at the bottom.
 
@@ -147,13 +148,14 @@ app/src/main/java/uk/debil/status/
   StatusDataSource.java   complication service, builds SHORT_TEXT / LONG_TEXT data
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
-  ProblemsActivity.java   scrollable full list (or categories), opened by tapping the complication
+  ProblemsActivity.kt     scrollable full list (or categories), opened by tapping the complication
+  Theme.kt                Material 3 theme, status colours and shared list rows
   Group.java              one category from the optional "groups" field
   Refresh.java            asks Wear OS to update the complication now
   Config.java             URL + token storage (token encrypted with an Android Keystore key)
-  SetupActivity.java      setup screen: Wi-Fi, QR code, address and PIN
+  SetupActivity.kt        setup screen: Wi-Fi, QR code, address and PIN
   SetupServer.java        the one-page web server the phone talks to during setup
-  ManualSetupActivity.java  fallback: type URL and token on the watch
+  ManualSetupActivity.kt  fallback: type URL and token on the watch
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 server/
