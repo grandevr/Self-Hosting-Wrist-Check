@@ -7,3 +7,6 @@ secrets.properties
 *.iml
 .kotlin/
 .DS_Store
+keystore.properties
+*.jks
+*.keystore

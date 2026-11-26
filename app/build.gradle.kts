@@ -25,6 +25,25 @@ fun secret(name: String): String {
     return value.replace("\\", "\\\\").replace("\"", "\\\"")
 }
 
+// Release signing key, from keystore.properties in the project root (not committed). Keep the
+// same keystore for every build so new APKs install over old ones with `adb install -r`.
+// Without the file, release builds are signed with this machine's debug key instead.
+val keystoreFile = rootProject.file("keystore.properties")
+val keystore = Properties().apply {
+    if (keystoreFile.exists()) keystoreFile.inputStream().use { load(it) }
+}
+fun keystoreValue(name: String): String {
+    val value = keystore.getProperty(name)?.trim().orEmpty()
+    if (value.isEmpty()) {
+        throw GradleException(
+            "$name is missing in keystore.properties. Fill in storeFile, storePassword, keyAlias " +
+                "and keyPassword (see keystore.properties.example), or delete the file to sign " +
+                "with the debug key."
+        )
+    }
+    return value
+}
+
 android {
     namespace = "uk.debil.status"
     compileSdk = 36
@@ -49,10 +68,29 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        if (keystoreFile.exists()) {
+            create("release") {
+                storeFile = rootProject.file(keystoreValue("storeFile"))
+                storePassword = keystoreValue("storePassword")
+                keyAlias = keystoreValue("keyAlias")
+                keyPassword = keystoreValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            // R8 strips the unused parts of Compose and the other libraries, and drops
+            // resources nothing refers to. Keep rules: proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 }
