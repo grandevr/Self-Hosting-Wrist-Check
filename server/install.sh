@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Wrist Check server setup: the Uptime Kuma status writer and/or the Caddy route that checks the token.
+# Wrist Check server setup: the Uptime Kuma status writer and/or the token check in your reverse proxy.
+# Proxies: Caddy and nginx are set up by the script; Nginx Proxy Manager, Traefik, Apache, HAProxy and
+# anything else get the exact lines to add and where (PROXY=caddy|nginx|npm|traefik|apache|haproxy|other).
 #
 # One server with Kuma, Caddy and Python, one line:
 #   curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash
@@ -38,8 +40,9 @@
 #           SKIP_VALIDATE  RELOAD_CMD  SNIPPET_OUT (with --print-snippet: write to this file)
 #   Writer: KUMA_URL  KUMA_SLUG  OUT  OUT_ACCESS=acl|owner  SLOW_MS  SLOW_RUNS  PENDING=ignore|slow|down
 #           PRIORITY_GROUPS  WRITER_USER  WRITER_SRC  SKIP_KUMA_CHECK
-#   Both:   ROLE=all|writer|route  CONF_DIR
-# Needs: bash and coreutils. Writer: python3, systemd. Route: Caddy. curl only to pipe this script.
+#   nginx:  NGINX_DIR  NGINX_SNIPPET  NGINX_SITE (the file with the server { } for DOMAIN)
+#   Both:   ROLE=all|writer|route  PROXY  CONF_DIR
+# Needs: bash and coreutils. Writer: python3, systemd. curl only to pipe this script.
 
 # Everything runs from main() at the very end, so a half-downloaded script never runs partly.
 set -euo pipefail
@@ -58,7 +61,7 @@ DEFAULT_OUT=/var/lib/wrist-check/status.json
 DATA_DIR=/var/lib/wrist-check
 WRITER_BIN=${WRITER_BIN:-/usr/local/bin/wrist-check-status}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
-SETTINGS="ROLE DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM PROTECT KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER OUT_ACCESS"
+SETTINGS="ROLE PROXY DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM PROTECT KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER OUT_ACCESS"
 TMP_DIR=""
 USED_LOCAL_WRITER=""
 exec 3>&1   # messages; moved to stderr by --print-snippet so stdout is only the snippet
@@ -191,7 +194,18 @@ protect_path() {
   else echo "$STATUS_PATH"; fi
 }
 
-snippet_text() {
+snippet_text() { # the token check for the chosen proxy
+  case "${PROXY:-caddy}" in
+    caddy) caddy_text ;;
+    nginx|npm) nginx_text ;;
+    apache) apache_text ;;
+    haproxy) haproxy_text ;;
+    traefik) traefik_text ;;
+    *) other_text ;;
+  esac
+}
+
+caddy_text() {
   local how="install.sh" pp; pp=$(protect_path)
   case "$ROUTE" in
     file) cat <<CADDY
@@ -403,24 +417,30 @@ reload_caddy() { # 0 reloaded, 1 reload failed, 2 not attempted
   msg "Caddy reloaded."
 }
 
-backup_dir() { if [ -w "$(dirname "$CADDYFILE")" ]; then dirname "$CADDYFILE"; else echo "$CONF_DIR"; fi; }
+backup_dir() { # backup_dir FILE: next to FILE if that folder is writable, otherwise the settings folder.
+  # nginx files always go to the settings folder: nginx loads every file in sites-enabled/, copies too.
+  case "$1" in "$NGINX_DIR"/*) install -d -m 700 "$CONF_DIR" 2>/dev/null; echo "$CONF_DIR"; return ;; esac
+  if [ -w "$(dirname "$1")" ]; then dirname "$1"; else install -d -m 700 "$CONF_DIR" 2>/dev/null; echo "$CONF_DIR"; fi
+}
 
 # Every file this run changes is copied first (once), so restore() can put them all back.
 BACKED_UP=()
+BACKUPS=()
 SN_NEW=no
 backup() { # backup FILE: copies it once per run; BK is where the copy is
-  local f=$1
-  BK="$(backup_dir)/$(basename "$f").wrist-check.bak"
-  if [[ " ${BACKED_UP[*]} " != *" $f "* ]]; then
-    ( umask 077; cp "$f" "$BK" )
-    BACKED_UP+=("$f")
-  fi
+  local f=$1 i
+  for i in "${!BACKED_UP[@]}"; do
+    [ "${BACKED_UP[$i]}" = "$f" ] && { BK=${BACKUPS[$i]}; return 0; }
+  done
+  BK="$(backup_dir "$f")/$(basename "$f").wrist-check.bak"
+  ( umask 077; cp "$f" "$BK" )
+  BACKED_UP+=("$f"); BACKUPS+=("$BK")
 }
 
 restore() {
-  local f
-  for f in "${BACKED_UP[@]}"; do cat "$(backup_dir)/$(basename "$f").wrist-check.bak" > "$f"; done
-  [ "$SN_NEW" = yes ] && rm -f "$CADDY_SNIPPET"
+  local i
+  for i in "${!BACKED_UP[@]}"; do cat "${BACKUPS[$i]}" > "${BACKED_UP[$i]}"; done
+  [ "$SN_NEW" = yes ] && rm -f "$(snippet_file)"
   true
 }
 
@@ -484,6 +504,7 @@ manual_import() {
 # fails, every changed file goes back to how it was.
 # Stops (before anything is changed) when the route can't work as asked.
 check_route() {
+  case "$PROXY" in caddy) ;; nginx) check_route_nginx; return ;; *) return 0 ;; esac
   local old
   old=$(old_checks)
   if [ -n "$old" ] && [ "${OLD_CHECK:-}" != disable ] && [ "${OLD_CHECK:-}" != keep ]; then
@@ -540,18 +561,25 @@ reload then does the check, and a failed reload is rolled back the same way."
 }
 
 ask_route() {
-  suggest DOMAIN "$D_DOMAIN"
+  ask_proxy
+  [ "$PROXY" = caddy ] && suggest DOMAIN "$D_DOMAIN"
+  [ "$PROXY" = nginx ] && have_tty && suggest DOMAIN "$(nginx_domain)"
   ask DOMAIN "Domain the watch connects to (as in https://<domain>/...)" "${DOMAIN:-}"
   [ -n "$DOMAIN" ] || [ "$ACTION" = print ] || need DOMAIN "Domain the watch connects to (as in https://<domain>/...)" "it's part of the status URL"
   [ -z "$DOMAIN" ] || check DOMAIN '^[A-Za-z0-9*.-]+$' "a host name like example.com"
   ask STATUS_PATH "Path of the status file on that domain" "${STATUS_PATH:-/health/status.json}"
   case "$STATUS_PATH" in /*) ;; *) STATUS_PATH="/$STATUS_PATH" ;; esac
   check STATUS_PATH '^/[A-Za-z0-9._~/-]+$' "a URL path like /health/status.json"
-  if [ "$ROLE" = all ]; then
-    ROUTE="file"   # the writer is on this machine, so Caddy serves its file
+  local modes; modes=$(modes_for "$PROXY")
+  if [ "$modes" = check-only ] || [ "$modes" = proxy ]; then
+    [ -z "${ROUTE:-}" ] || [ "$ROUTE" = "$modes" ] || die "ROUTE=$ROUTE doesn't work with $(proxy_name): it supports only $modes"
+    ROUTE=$modes   # the only mode this proxy supports
+    [ "$PROXY" = traefik ] && have_tty && msg "Traefik passes the status path on to the address that serves it (proxy mode)."
+  elif [ "$ROLE" = all ]; then
+    ROUTE="file"   # the writer is on this machine, so the proxy serves its file
   else
     if have_tty; then
-      detect_route
+      if [ "$PROXY" = nginx ]; then detect_route_nginx; elif [ "$PROXY" = caddy ]; then detect_route; fi
       case "$D_ROUTE" in
         check-only) msg "This site already passes requests on to ${D_UPSTREAM:-another server}, so it only needs the token check (check-only)." ;;
         proxy) msg "This site passes requests on inside handle/route sections, where an added check would be skipped, so proxy fits." ;;
@@ -565,13 +593,14 @@ ask_route() {
     need ROUTE "Answer (file / check-only / proxy)" "file, check-only or proxy"
   fi
   check ROUTE '^(file|check-only|proxy)$' "file, check-only or proxy"
+  case " $modes " in *" $ROUTE "*) ;; *) die "ROUTE=$ROUTE doesn't work with $PROXY (it supports: $modes)" ;; esac
   if [ "$ROUTE" = proxy ]; then
     suggest UPSTREAM "$D_UPSTREAM"
-    need UPSTREAM "Address that serves the status file (host:port or URL)" "where requests with the token go"
+    need UPSTREAM "Address that serves the status file, e.g. the one your site already goes to (host:port or URL)" "where requests with the token go"
     check UPSTREAM '^[][A-Za-z0-9.:/_-]+$' "host:port or a URL like http://10.0.0.5:8080"
   fi
   if [ "$ROUTE" != file ] && [ "$STATUS_PATH" != "/${STATUS_PATH##*/}" ]; then
-    have_tty && old_folder_wide && suggest PROTECT folder
+    have_tty && [ "$PROXY" = caddy ] && old_folder_wide && suggest PROTECT folder
     ask PROTECT "Protect only ${STATUS_PATH##*/}, or everything in $(dirname "$STATUS_PATH")/ (file / folder)" "${PROTECT:-file}"
     check PROTECT '^(file|folder)$' "file or folder"
   else
@@ -583,6 +612,7 @@ ask_route() {
 
 # An old token check found earlier: with a terminal, ask what to do; without one, OLD_CHECK decides.
 ask_old_check() {
+  [ "$PROXY" = caddy ] || return 0
   [ -n "${ALLOW_EXISTING_ROUTE:-}" ] && is_yes "$ALLOW_EXISTING_ROUTE" && OLD_CHECK=${OLD_CHECK:-keep}
   local old; old=$(old_checks)
   [ -n "$old" ] && [ -z "${OLD_CHECK:-}" ] && have_tty || return 0
@@ -604,6 +634,331 @@ ask_old_check() {
   check OLD_CHECK '^(disable|print|stop|keep)$' "disable, print or stop"
   [ "$OLD_CHECK" = stop ] && die "stopped, nothing changed."
   true
+}
+
+# ------------------------------------------------------------------------------- other proxies
+# PROXY says which reverse proxy the watch connects to:
+#   caddy    edits the Caddyfile itself (above)
+#   nginx    writes a snippet, includes it in the server { } for DOMAIN, runs nginx -t and reloads
+#   npm      Nginx Proxy Manager: prints lines for the proxy host's "Advanced" tab
+#   traefik  prints a file-provider config (routers + service)
+#   apache   prints lines for the <VirtualHost>
+#   haproxy  prints a line for the frontend
+#   other    describes the rule, for any other web server
+# Only caddy and nginx are changed by the script; the others get exact paste-in steps.
+
+PROXIES="caddy nginx npm traefik apache haproxy other"
+NGINX_DIR=${NGINX_DIR:-/etc/nginx}
+NGINX_SNIPPET=${NGINX_SNIPPET:-$NGINX_DIR/snippets/wrist-check.conf}
+
+snippet_file() { # where this proxy's snippet lives when the script installs it
+  case "$PROXY" in nginx) echo "$NGINX_SNIPPET" ;; *) echo "$CADDY_SNIPPET" ;; esac
+}
+
+proxy_name() {
+  case "${1:-$PROXY}" in
+    caddy) echo Caddy ;; nginx) echo nginx ;; npm) echo "Nginx Proxy Manager" ;; traefik) echo Traefik ;;
+    apache) echo Apache ;; haproxy) echo HAProxy ;; *) echo "your proxy" ;;
+  esac
+}
+
+modes_for() { # route modes each proxy supports
+  case "$1" in
+    haproxy|other) echo "check-only" ;;
+    traefik) echo "proxy" ;;
+    *) echo "file check-only proxy" ;;
+  esac
+}
+
+upstream_url() { case "$UPSTREAM" in http://*|https://*) echo "${UPSTREAM%/}" ;; *) echo "http://${UPSTREAM%/}" ;; esac; }
+
+path_regex() { # protected path as an anchored regex: ^/health/status\.json$ or ^/health/
+  if [ "${PROTECT:-file}" = folder ]; then printf '^%s/' "$(dirname "$STATUS_PATH" | sed 's/\./\\./g')"
+  else printf '^%s$' "$(printf '%s' "$STATUS_PATH" | sed 's/\./\\./g')"; fi
+}
+
+prefix_path() { # protected path as a plain prefix (folder) or exact path (file)
+  if [ "${PROTECT:-file}" = folder ]; then echo "$(dirname "$STATUS_PATH")/"; else echo "$STATUS_PATH"; fi
+}
+
+nginx_text() {
+  cat <<NGINX
+# Wrist Check (install.sh, nginx, ROUTE=$ROUTE): requests for $(prefix_path) without the right token get 404.
+# Goes inside the server { } for $DOMAIN. The checks run before nginx picks a location.
+set \$wristcheck "";
+if (\$uri ~ "$(path_regex)") { set \$wristcheck "p"; }
+if (\$http_authorization != "Bearer $TOKEN") { set \$wristcheck "\${wristcheck}t"; }
+if (\$wristcheck = "pt") { return 404; }
+NGINX
+  case "$ROUTE" in
+    file) cat <<NGINX
+location = $STATUS_PATH {
+	alias $OUT;
+	default_type application/json;
+	add_header Cache-Control "no-store";
+}
+NGINX
+    ;;
+    proxy) cat <<NGINX
+location ^~ $(prefix_path) {
+	proxy_pass $(upstream_url);
+	proxy_set_header Authorization "";
+}
+NGINX
+    ;;
+  esac
+}
+
+apache_text() {
+  cat <<APACHE
+# Wrist Check (install.sh, Apache, ROUTE=$ROUTE): requests for $(prefix_path) without the right token get 404.
+# Goes inside the <VirtualHost *:443> for $DOMAIN. Needs mod_rewrite.
+RewriteEngine On
+RewriteCond "%{HTTP:Authorization}" "!=Bearer $TOKEN"
+RewriteRule "$(path_regex)" - [R=404,L]
+APACHE
+  case "$ROUTE" in
+    file) cat <<APACHE
+Alias "$STATUS_PATH" "$OUT"
+<Directory "$(dirname "$OUT")">
+	Require all granted
+</Directory>
+APACHE
+    ;;
+    proxy) cat <<APACHE
+# Needs mod_proxy_http and mod_headers.
+<Location "$(prefix_path)">
+	RequestHeader unset Authorization
+</Location>
+ProxyPass "$(prefix_path)" "$(upstream_url)$(prefix_path)"
+ProxyPassReverse "$(prefix_path)" "$(upstream_url)$(prefix_path)"
+APACHE
+    ;;
+  esac
+}
+
+haproxy_text() {
+  local cond="path $STATUS_PATH"
+  [ "${PROTECT:-file}" = folder ] && cond="path_beg $(prefix_path)"
+  cat <<HAPROXY
+# Wrist Check (install.sh, HAProxy): requests for $(prefix_path) without the right token get 404.
+# Goes in the frontend that serves $DOMAIN. Requests with the token go to your usual backend.
+http-request deny deny_status 404 if { $cond } !{ req.hdr(authorization) -m str "Bearer $TOKEN" }
+HAPROXY
+}
+
+traefik_text() {
+  local rule="Path(\`$STATUS_PATH\`)"
+  [ "${PROTECT:-file}" = folder ] && rule="PathPrefix(\`$(prefix_path)\`)"
+  cat <<TRAEFIK
+# Wrist Check (install.sh, Traefik file provider, v3 rule syntax; on v2 write Headers( instead of
+# Header( and ipWhiteList instead of ipAllowList). Requests for $(prefix_path) with the right token go to
+# $(upstream_url); without it Traefik answers 403 (it has no built-in 404 reply).
+http:
+  routers:
+    wrist-check:
+      rule: "Host(\`$DOMAIN\`) && $rule && Header(\`Authorization\`, \`Bearer $TOKEN\`)"
+      priority: 10001
+      tls: {}
+      middlewares: [wrist-check-strip]
+      service: wrist-check
+    wrist-check-denied:
+      rule: "Host(\`$DOMAIN\`) && $rule"
+      priority: 10000
+      tls: {}
+      middlewares: [wrist-check-deny]
+      service: noop@internal
+  middlewares:
+    wrist-check-strip:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+    wrist-check-deny:
+      ipAllowList:
+        sourceRange: ["127.0.0.1/32"]
+  services:
+    wrist-check:
+      loadBalancer:
+        servers:
+          - url: "$(upstream_url)"
+TRAEFIK
+}
+
+other_text() {
+  cat <<OTHER
+# Wrist Check: the rule for any web server or proxy in front of $DOMAIN.
+#   Requests for $(prefix_path)
+#   with the header   Authorization: Bearer $TOKEN   -> handle as usual (pass on, or serve the file)
+#   without it                                      -> answer 404
+OTHER
+}
+
+# Steps after printing, for the proxies the script doesn't change itself. $1 = step number to start at.
+paste_steps() {
+  local n=$1 where=${SNIPPET_OUT:-}
+  case "$PROXY" in
+    nginx)
+      if [ -n "$where" ]; then msg "  $n. Add  include $where;  inside the server { } for $DOMAIN (next to server_name)."
+      else msg "  $n. Paste the lines above inside the server { } for $DOMAIN (next to server_name)."; fi
+      msg "  $((n + 1)). Check and reload:  sudo nginx -t && sudo systemctl reload nginx" ;;
+    npm)
+      msg "  $n. In Nginx Proxy Manager: Hosts > Proxy Hosts > $DOMAIN > Edit > Advanced. Paste the lines above"
+      msg "     into \"Custom Nginx Configuration\" and save (NPM checks the config when you save)." ;;
+    traefik)
+      msg "  $n. Save the lines above as a .yml file in the folder Traefik's file provider watches"
+      msg "     (providers.file.directory, e.g. /etc/traefik/dynamic/wrist-check.yml). Traefik loads it by itself." ;;
+    apache)
+      msg "  $n. Paste the lines above inside the <VirtualHost *:443> for $DOMAIN."
+      msg "     Turn on the modules they use: sudo a2enmod rewrite$([ "$ROUTE" = proxy ] && echo ' proxy_http headers')"
+      msg "  $((n + 1)). Check and reload:  sudo apachectl configtest && sudo systemctl reload apache2" ;;
+    haproxy)
+      msg "  $n. Paste the line above into the frontend that serves $DOMAIN, before its use_backend lines."
+      msg "  $((n + 1)). Check and reload:  sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy" ;;
+    other)
+      msg "  $n. Set up that rule in your web server or proxy." ;;
+  esac
+}
+
+# --- nginx, changed by the script ----------------------------------------------------------------
+
+nginx_conf_files() { # config files that can hold server blocks
+  local f
+  for f in "$NGINX_DIR"/sites-enabled/* "$NGINX_DIR"/conf.d/*.conf "$NGINX_DIR"/nginx.conf; do
+    [ -f "$f" ] && [ -r "$f" ] && echo "$f"
+  done
+}
+
+nginx_sites() { # files with "server_name ... DOMAIN ...;" (NGINX_SITE overrides)
+  if [ -n "${NGINX_SITE:-}" ]; then echo "$NGINX_SITE"; return 0; fi
+  [ -n "${DOMAIN:-}" ] || return 0
+  local esc; esc=$(printf '%s' "$DOMAIN" | sed 's/[.*]/\\&/g')
+  nginx_conf_files | while IFS= read -r f; do
+    grep -qE "^[[:space:]]*server_name[^;]*[[:space:]]$esc([[:space:];]|$)" "$f" && echo "$f"
+  done
+  true
+}
+
+nginx_old_checks() { # lines in those files that already check the Authorization header
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] && grep -nE 'http_authorization' "$f" | grep -v 'wrist-check' | sed "s|^|    $f, line |; s|:|:  |"
+  done <<< "$(nginx_sites)"
+  true
+}
+
+nginx_has_include() { grep -qF "include $NGINX_SNIPPET;" "$1"; }
+
+nginx_ok() { command -v nginx >/dev/null || return 0; nginx -t >/dev/null 2>&1 || { nginx -t 2>&1 | tail -n 5 | sed 's/^/    /' >&2; return 1; }; }
+
+nginx_reload() { # 0 reloaded, 1 failed, 2 not attempted
+  if [ -n "${RELOAD_CMD:-}" ]; then bash -c "$RELOAD_CMD" >&3 || return 1
+  elif command -v systemctl >/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then systemctl reload nginx || return 1
+  elif command -v nginx >/dev/null && [ -n "$(pgrep -x nginx 2>/dev/null)" ]; then nginx -s reload || return 1
+  else return 2; fi
+  msg "nginx reloaded."
+}
+
+check_route_nginx() {
+  [ "$IS_ROOT" = yes ] || [ -w "$(dirname "$NGINX_SNIPPET")" ] || is_yes "${DRY_RUN:-}" \
+    || die "can't write $NGINX_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
+  local old; old=$(nginx_old_checks)
+  if [ -n "$old" ] && [ "${OLD_CHECK:-}" != keep ]; then
+    msg "Your nginx config for $DOMAIN already checks the Authorization header:"
+    msg "$old"
+    die "a second check with a different token would answer 404 to every request, so nothing was changed.
+Remove that check (or turn it into the new one by hand with --print-snippet), or set OLD_CHECK=keep."
+  fi
+  [ -n "$(nginx_sites)" ] || msg "Couldn't find \"server_name $DOMAIN\" in the nginx config: you'll add the include line yourself."
+  true
+}
+
+apply_route_nginx() {
+  local f rc=0 added=0
+  install -d -m 755 "$(dirname "$NGINX_SNIPPET")"
+  SN_NEW=yes
+  if [ -f "$NGINX_SNIPPET" ]; then SN_NEW=no; backup "$NGINX_SNIPPET"; fi
+  ( umask 077; snippet_text > "$NGINX_SNIPPET" )
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    nginx_has_include "$f" && { added=1; continue; }
+    [ -w "$f" ] || { restore; die "can't edit $f as $(id -un)."; }
+    backup "$f"
+    # The include goes right after each "server_name ... DOMAIN" line (port 80 and 443 servers alike).
+    local esc; esc=$(printf '%s' "$DOMAIN" | sed 's/[.*]/\\&/g')
+    awk -v re="^[[:space:]]*server_name[^;]*[[:space:]]$esc([[:space:];]|\$)" -v inc="include $NGINX_SNIPPET;" \
+      '{ print } $0 ~ re { match($0, /^[ \t]*/); print substr($0, 1, RLENGTH) inc }' "$BK" > "$f"
+    msg "Added 'include $NGINX_SNIPPET;' to the $DOMAIN server in $f (old version: $BK)."
+    added=1
+  done <<< "$(nginx_sites)"
+  if [ "$added" = 0 ]; then
+    msg "Add this line inside the server { } for $DOMAIN yourself, then reload nginx:"
+    msg ""; msg "    include $NGINX_SNIPPET;"; msg ""
+    return 0
+  fi
+  nginx_ok || { restore; die "nginx -t didn't accept the new config, so every changed file was put back."; }
+  nginx_reload || rc=$?
+  if [ "$rc" = 1 ]; then restore; nginx_reload >/dev/null 2>&1 || true; die "reloading nginx failed, so every changed file was put back."
+  elif [ "$rc" = 2 ]; then msg "Reload nginx yourself (e.g. sudo systemctl reload nginx)."; fi
+}
+
+uninstall_nginx() {
+  local f
+  while IFS= read -r f; do
+    [ -f "$f" ] && nginx_has_include "$f" || continue
+    backup "$f"
+    grep -vF "include $NGINX_SNIPPET;" "$BK" > "$f" || true
+    msg "Removed the include from $f (old version: $BK)."
+  done <<< "$(nginx_conf_files)"
+  rm -f "$NGINX_SNIPPET"
+  local rc=0; nginx_reload || rc=$?
+  [ "$rc" = 2 ] && msg "Reload nginx yourself."
+  true
+}
+
+nginx_domain() { # first real name in a server_name line (not "_" or "localhost")
+  nginx_conf_files | while IFS= read -r f; do grep -hE '^[[:space:]]*server_name[[:space:]]' "$f"; done \
+    | tr -d ';' | awk '{ for (i = 2; i <= NF; i++) if ($i ~ /\./ && $i !~ /^[*~]/) { print $i; exit } }'
+  true
+}
+
+detect_route_nginx() {
+  local f
+  D_ROUTE="file"
+  while IFS= read -r f; do
+    [ -n "$f" ] && grep -qE '^[[:space:]]*proxy_pass[[:space:]]' "$f" && {
+      D_ROUTE=check-only
+      D_UPSTREAM=$(grep -m1 -E '^[[:space:]]*proxy_pass[[:space:]]' "$f" | awk '{ gsub(/;/, "", $2); print $2 }')
+    }
+  done <<< "$(nginx_sites)"
+  true
+}
+
+detect_proxies() { # which reverse proxies run here, best guess first
+  D_PROXIES=""
+  local imgs=""
+  docker_ok && imgs=$(docker ps --format '{{.Image}}' 2>/dev/null | tr 'A-Z' 'a-z')
+  { [ -n "$(caddy_bin)" ] || [ -r "$CADDYFILE" ]; } && D_PROXIES="$D_PROXIES caddy"
+  grep -q 'nginx-proxy-manager' <<< "$imgs" && D_PROXIES="$D_PROXIES npm"
+  { command -v traefik >/dev/null || grep -q 'traefik' <<< "$imgs"; } && D_PROXIES="$D_PROXIES traefik"
+  { command -v haproxy >/dev/null || grep -q 'haproxy' <<< "$imgs"; } && D_PROXIES="$D_PROXIES haproxy"
+  { command -v nginx >/dev/null && [ -d "$NGINX_DIR" ]; } && D_PROXIES="$D_PROXIES nginx"
+  { command -v apache2 >/dev/null || command -v httpd >/dev/null; } && D_PROXIES="$D_PROXIES apache"
+  D_PROXIES=${D_PROXIES# }
+  true
+}
+
+ask_proxy() {
+  if [ -z "${PROXY:-}" ]; then
+    if have_tty; then
+      [ -n "${D_PROXIES:-}" ] || detect_proxies
+      msg "Which reverse proxy does the watch connect through?"
+      msg "  caddy  nginx  npm (Nginx Proxy Manager)  traefik  apache  haproxy  other"
+      [ -n "$D_PROXIES" ] && msg "  Found here: $D_PROXIES"
+      ask PROXY "Answer" "${D_PROXIES%% *}"
+    fi
+    PROXY=${PROXY:-caddy}   # without a terminal, Caddy as before
+  fi
+  case " $PROXIES " in *" $PROXY "*) ;; *) die "PROXY='$PROXY' isn't one of: $PROXIES" ;; esac
 }
 
 # --------------------------------------------------------------------------------------- writer
@@ -773,7 +1128,7 @@ UNIT
 # Only with a terminal: what's found becomes the suggested answer, and you confirm or change it.
 # Without a terminal nothing is guessed: answers come from the environment or the saved settings.
 
-D_ROLE=""; D_KUMA_URL=""; D_SLUGS=""; D_CADDY=""; D_DOMAIN=""; D_ROUTE=""; D_UPSTREAM=""; D_OUT=""; D_OTHER_TIMERS=""
+D_PROXIES=""; D_ROLE=""; D_KUMA_URL=""; D_SLUGS=""; D_CADDY=""; D_DOMAIN=""; D_ROUTE=""; D_UPSTREAM=""; D_OUT=""; D_OTHER_TIMERS=""
 
 py_get() { # py_get URL: prints the body of a 200 answer (3 s timeout), python3 or curl
   if command -v python3 >/dev/null; then
@@ -893,14 +1248,16 @@ detect_all() {
   if [ -n "$D_KUMA_URL" ]; then msg "  Uptime Kuma:  $D_KUMA_URL${D_SLUGS:+ (status pages: $D_SLUGS)}"
   elif [ -n "$D_SLUGS" ]; then msg "  Uptime Kuma:  its database is here (status pages: $D_SLUGS), but nothing answers on the usual ports"
   else msg "  Uptime Kuma:  not found"; fi
-  if [ -n "$D_CADDY" ]; then msg "  Caddy:        yes ($CADDYFILE${D_DOMAIN:+, site $D_DOMAIN})"; else msg "  Caddy:        not found"; fi
+  detect_proxies
+  if [ -n "$D_CADDY" ]; then msg "  Caddy:        yes ($CADDYFILE${D_DOMAIN:+, site $D_DOMAIN})"; fi
+  if [ -n "$D_PROXIES" ]; then msg "  Proxies:      $D_PROXIES"; else msg "  Proxy:        none found"; fi
   msg "  python3:      $py"
   [ -n "$D_OTHER_TIMERS" ] && msg "  Other timers: $D_OTHER_TIMERS(maybe an older status writer)"
   local why
   if [ -z "${ROLE:-}" ]; then
-    if [ -n "$D_KUMA_URL" ] && [ -n "$D_CADDY" ]; then D_ROLE=all; why="Kuma and Caddy are both here"
-    elif [ -n "$D_KUMA_URL" ]; then D_ROLE=writer; why="Kuma is here, Caddy isn't"
-    elif [ -n "$D_CADDY" ]; then D_ROLE=route; why="Caddy is here, Kuma isn't"
+    if [ -n "$D_KUMA_URL" ] && [ -n "$D_PROXIES" ]; then D_ROLE=all; why="Kuma and a proxy are both here"
+    elif [ -n "$D_KUMA_URL" ]; then D_ROLE=writer; why="Kuma is here, no proxy"
+    elif [ -n "$D_PROXIES" ]; then D_ROLE=route; why="a proxy is here, Kuma isn't"
     else D_ROLE=all; why="found neither, so assuming one server"; fi
     [ "$D_ROLE" != route ] && [ "$py" = no ] && { D_ROLE=route; why="no python3 here for the writer"; }
     msg "  Suggested:    $D_ROLE ($why)"
@@ -935,13 +1292,23 @@ plan() { # what this run is about to change, in plain words
     msg "    - install $WRITER_BIN and the wrist-check-status timer"
   fi
   if [ "$ROLE" != writer ]; then
-    local old; old=$(old_checks)
-    msg "  Token check in Caddy, for $STATUS_URL"
+    msg "  Token check in $(proxy_name), for $STATUS_URL"
     msg "    - token: $(token_desc)"
-    msg "    - write $CADDY_SNIPPET ($ROUTE, protects $(protect_path))"
-    [ -n "$old" ] && [ "${OLD_CHECK:-}" = disable ] && msg "    - comment out the old token check ($(grep -c . <<< "$old") places)"
-    has_import || msg "    - add '$IMPORT_LINE' to the $DOMAIN part of $CADDYFILE"
-    msg "    - check the config and reload Caddy; if either fails, put everything back"
+    case "$PROXY" in
+      caddy)
+        local old; old=$(old_checks)
+        msg "    - write $CADDY_SNIPPET ($ROUTE, protects $(protect_path))"
+        [ -n "$old" ] && [ "${OLD_CHECK:-}" = disable ] && msg "    - comment out the old token check ($(grep -c . <<< "$old") places)"
+        has_import || msg "    - add '$IMPORT_LINE' to the $DOMAIN part of $CADDYFILE"
+        msg "    - check the config and reload Caddy; if either fails, put everything back" ;;
+      nginx)
+        msg "    - write $NGINX_SNIPPET ($ROUTE, protects $(prefix_path))"
+        local f; while IFS= read -r f; do [ -n "$f" ] && ! nginx_has_include "$f" && msg "    - include it in the $DOMAIN server in $f"; done <<< "$(nginx_sites)"
+        msg "    - run nginx -t and reload nginx; if either fails, put everything back" ;;
+      *)
+        msg "    - print the lines for $(proxy_name) ($ROUTE, protects $(prefix_path)) and the steps to add them;"
+        msg "      the script doesn't change $(proxy_name) itself" ;;
+    esac
   fi
   msg "  Settings saved in $ENV_FILE"
 }
@@ -967,13 +1334,21 @@ next_route_steps() {
   msg "  2. Then, on that machine, print the URL and token for the watch: the same line with --show."
 }
 
+proxy_config_text() { # the config text for DOMAIN the script can read, to find a token already in use
+  case "$PROXY" in
+    caddy) site_lines | cut -d"$US" -f4- ;;
+    nginx) local f; while IFS= read -r f; do [ -n "$f" ] && cat "$f"; done <<< "$(nginx_sites)" ;;
+  esac
+  true
+}
+
 ask_existing_token() { # with a terminal, offer to reuse a token instead of making a new one
   [ "$TOKEN_SOURCE" = new ] && have_tty || return 0
   local t="" keep=""
   # A hand-written route in the site block may already check a token: keeping it keeps the watches working.
-  t=$(site_lines | cut -d"$US" -f4- | grep -v '^[[:space:]]*#' | sed -n 's/.*"Bearer \([A-Za-z0-9._~+\/=-]\{16,512\}\)".*/\1/p' | head -n1)
+  t=$(proxy_config_text | grep -v '^[[:space:]]*#' | sed -n 's/.*"Bearer \([A-Za-z0-9._~+\/=-]\{16,512\}\)".*/\1/p' | head -n1)
   if [ -n "$t" ]; then
-    ask keep "Your Caddy config already uses a token (${t:0:4}...). Keep it, so watches already set up keep working? (yes / no)" "yes"
+    ask keep "Your $(proxy_name) config already uses a token (${t:0:4}...). Keep it, so watches already set up keep working? (yes / no)" "yes"
     if is_yes "$keep"; then TOKEN=$t; TOKEN_SOURCE="your existing Caddy route"; return 0; fi
     t=""
   fi
@@ -1012,15 +1387,14 @@ print_snippet() {
   load_env
   ROLE=route
   if [ "${ROUTE_ASKED:-}" != yes ]; then
-    have_tty && { detect_caddy; msg ""; }
+    have_tty && { detect_proxies; detect_caddy; msg ""; }
     ask_route
   fi
-  resolve_token
-  ask_existing_token
+  [ -n "${TOKEN_SOURCE:-}" ] || { resolve_token; ask_existing_token; }
   local saved=yes old="" n=1
   save_token || saved=no
-  [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] && old=$(old_checks)
-  if [ "$ROUTE" = check-only ] && [ -n "${DOMAIN:-}" ] && [ -n "$(handle_blocks)" ]; then
+  [ "$PROXY" = caddy ] && [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] && old=$(old_checks)
+  if [ "$PROXY" = caddy ] && [ "$ROUTE" = check-only ] && [ -n "${DOMAIN:-}" ] && [ -n "$(handle_blocks)" ]; then
     msg "Warning: in the $DOMAIN part of $CADDYFILE, requests are passed on inside handle/route sections:"
     show_handles
     msg "A check-only block next to them would be skipped. Use ROUTE=proxy instead."
@@ -1028,7 +1402,8 @@ print_snippet() {
   fi
   if [ -n "${SNIPPET_OUT:-}" ]; then
     ( umask 077; snippet_text > "$SNIPPET_OUT" )
-    caddy_readable "$SNIPPET_OUT"
+    [ "$PROXY" = caddy ] && caddy_readable "$SNIPPET_OUT"
+    msg "Saved to $SNIPPET_OUT."
   else
     snippet_text
   fi
@@ -1037,6 +1412,17 @@ print_snippet() {
   elif [ "$TOKEN_SOURCE" = new ]; then msg "Couldn't save the new token in $TOKEN_PATH: it's only in the snippet."; fi
   msg ""
   msg "Next steps:"
+  if [ "$PROXY" != caddy ]; then
+    if [ "$PROXY" = nginx ] && [ -n "$(nginx_old_checks)" ]; then
+      msg "  $n. Your nginx config already checks the Authorization header. Remove that check first:"
+      nginx_old_checks | sed 's/^/   /' >&3
+      n=$((n + 1))
+    fi
+    paste_steps "$n"
+    msg "  Then set up the watch: run this script again with --show to print the URL and token."
+    [ -n "${STATUS_URL:-}" ] && { ( save_env ) 2>/dev/null || true; }
+    return 0
+  fi
   if [ -n "$old" ]; then
     msg "  $n. Your Caddy config already checks a token for $(dirname "$STATUS_PATH")/. Comment out or delete these"
     msg "     lines (error pages and headers can stay):"
@@ -1065,18 +1451,17 @@ install_all() {
   detect_all
   if [ -z "$ROLE" ]; then
     have_tty && msg "What should run here?
-  all     everything on this machine (Kuma and Caddy are both here)
-  writer  only the part that reads Kuma (the watch connects to Caddy on another machine)
-  route   only the token check in Caddy (Kuma is on another machine)"
+  all     everything on this machine (Kuma and the reverse proxy are both here)
+  writer  only the part that reads Kuma (the watch connects through a proxy on another machine)
+  route   only the token check in the reverse proxy (Kuma is on another machine)"
     ask ROLE "Answer (all / writer / route)" "${D_ROLE:-all}"
   fi
   check ROLE '^(all|writer|route)$' "all, writer or route"
-  if [ "$ROLE" = route ] && ! can_write_snippet && ! is_yes "${DRY_RUN:-}"; then
-    die "can't write $CADDY_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
-  fi
-
   if [ "$ROLE" != writer ]; then
     ask_route
+    if [ "$PROXY" = caddy ] && ! can_write_snippet && ! is_yes "${DRY_RUN:-}"; then
+      die "can't write $CADDY_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
+    fi
     ask_old_check
     if [ "${OLD_CHECK:-}" = print ]; then ACTION=print; ROUTE_ASKED=yes; print_snippet; exit 0; fi
   fi
@@ -1091,11 +1476,16 @@ install_all() {
 
   [ "$ROLE" = route ] || install_writer
 
-  if [ "$ROLE" != writer ]; then
-    command -v caddy >/dev/null || [ -n "$(caddy_bin)" ] || msg "Note: Caddy isn't installed here."
+  if [ "$ROLE" != writer ] && [ "$PROXY" != caddy ] && [ "$PROXY" != nginx ]; then
+    # The script doesn't change this proxy itself: print its config and the steps to add it.
+    msg ""
+    ACTION=print; ROUTE_ASKED=yes; print_snippet
+    exec 3>&1
+  elif [ "$ROLE" != writer ]; then
+    [ "$PROXY" = caddy ] && { command -v caddy >/dev/null || [ -n "$(caddy_bin)" ] || msg "Note: Caddy isn't installed here."; }
     save_token || die "couldn't save the token in $TOKEN_PATH"
     msg ""
-    apply_route
+    if [ "$PROXY" = nginx ]; then apply_route_nginx; else apply_route; fi
     msg ""
     token_note "readable by $(id -un) only"
     msg "Status URL: $STATUS_URL"
@@ -1121,7 +1511,16 @@ rotate() {
     exit 0
   fi
   save_token || die "couldn't save the token in $TOKEN_PATH"
-  if [ -f "$CADDY_SNIPPET" ]; then
+  if [ "${PROXY:-caddy}" = nginx ] && [ -f "$NGINX_SNIPPET" ]; then
+    backup "$NGINX_SNIPPET"; SN_NEW=no
+    ( umask 077; snippet_text > "$NGINX_SNIPPET" )
+    local rc=0
+    nginx_ok || { restore; die "nginx -t didn't accept the new snippet; it was put back."; }
+    nginx_reload || rc=$?
+    [ "$rc" = 1 ] && { restore; nginx_reload >/dev/null 2>&1 || true; die "reloading nginx failed; the old snippet was put back."; }
+    [ "$rc" = 2 ] && msg "Reload nginx yourself to start using the new token."
+    msg "New token is in place. Every watch must be set up again (--show prints it)."
+  elif [ "${PROXY:-caddy}" = caddy ] && [ -f "$CADDY_SNIPPET" ]; then
     write_snippet
     local rc=0
     caddy_validate || { restore; die "Caddy didn't accept the new snippet; it was put back."; }
@@ -1130,7 +1529,7 @@ rotate() {
     [ "$rc" = 2 ] && msg "Reload Caddy yourself to start using the new token."
     msg "New token is in place. Every watch must be set up again (--show prints it)."
   else
-    msg "New token saved in $TOKEN_PATH. Run --print-snippet and replace the old lines on your Caddy, then set the watches up again (--show)."
+    msg "New token saved in $TOKEN_PATH. Run --print-snippet and replace the old lines in your proxy, then set the watches up again (--show)."
   fi
   [ "$SHOW" = yes ] && show
   true
@@ -1147,6 +1546,7 @@ uninstall() {
     id wrist-check >/dev/null 2>&1 && todo+=("the user wrist-check")
   fi
   if [ "$role" != writer ]; then
+    [ -f "$NGINX_SNIPPET" ] && todo+=("$NGINX_SNIPPET and the lines that include it")
     has_import && todo+=("'$IMPORT_LINE' from $CADDYFILE")
     [ -f "$CADDY_SNIPPET" ] && todo+=("$CADDY_SNIPPET")
     [ -f "$TOKEN_PATH" ] && todo+=("the token ($TOKEN_PATH)")
@@ -1169,6 +1569,7 @@ uninstall() {
     msg "Status writer removed."
   fi
   if [ "$role" != writer ]; then
+    [ -f "$NGINX_SNIPPET" ] && uninstall_nginx
     if has_import; then
       [ -w "$CADDYFILE" ] || die "can't edit $CADDYFILE as $(id -un): use sudo"
       backup "$CADDYFILE"

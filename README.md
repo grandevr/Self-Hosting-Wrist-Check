@@ -47,9 +47,23 @@ Use plain service names (no ` UP` suffix), in the order you want them shown. Lea
 The watch reads one URL, such as `https://example.com/health/status.json`. It must return the status file when the request carries your token, and 404 otherwise. `server/install.sh` sets this up. It installs two parts, on one machine or on two:
 
 - **the writer** reads your Uptime Kuma status page every minute and writes `status.json`. It runs where Kuma can be reached and needs python3.
-- **the token check** goes into the Caddy that the watch connects to. It turns away requests without the token.
+- **the token check** goes into the reverse proxy that the watch connects to. It turns away requests without the token.
 
-Run it in a terminal and it guides you. It looks around the machine first (Kuma, its status pages, Caddy and its sites, a web server folder that already serves `/health/`, older status timers), suggests an answer to each question, and shows a plan before it changes anything. Add `--dry-run` to see the plan without changing anything.
+### Supported reverse proxies
+
+| Proxy | What the installer does |
+|---|---|
+| Caddy | adds the check to the Caddyfile itself, validates, reloads, rolls back on failure |
+| nginx | writes `/etc/nginx/snippets/wrist-check.conf`, includes it in the `server { }` for your domain, runs `nginx -t`, reloads, rolls back on failure |
+| Nginx Proxy Manager | prints the lines for the proxy host's **Advanced** tab |
+| Traefik | prints a file-provider config (two routers and a service). Without the token Traefik answers 403, because it has no built-in 404 reply |
+| Apache | prints the lines for the `<VirtualHost>` (uses mod_rewrite), plus the modules to turn on |
+| HAProxy | prints one `http-request deny` line for the frontend |
+| anything else | describes the rule: with `Authorization: Bearer <token>` pass on as usual, without it answer 404 |
+
+In a terminal it finds the proxies on the machine and asks which one the watch goes through; `PROXY=` answers it ahead of time (default `caddy`). Not every proxy can do every mode: HAProxy and "other" only check the token (`check-only`), and Traefik always passes the path to an address you give (`proxy`).
+
+Run it in a terminal and it guides you. It looks around the machine first (Kuma, its status pages, the reverse proxies and their sites, a web server folder that already serves `/health/`, older status timers), suggests an answer to each question, and shows a plan before it changes anything. Add `--dry-run` to see the plan without changing anything.
 
 ### Everything on one machine
 
@@ -61,7 +75,7 @@ Then print the URL and token for the watch with the same line plus `-s -- --show
 
 ### Writer at home, token check on another machine
 
-A common homelab layout: Kuma and a web server (nginx, or an inner Caddy) at home, and a public Caddy, often on a VPS, that handles HTTPS and passes requests home. Set it up in this order:
+A common homelab layout: Kuma and a web server (nginx, or an inner Caddy) at home, and a public reverse proxy (Caddy, nginx, Traefik, ...), often on a VPS, that handles HTTPS and passes requests home. Set it up in this order:
 
 1. **On the Kuma machine, install the writer.**
 
@@ -71,7 +85,7 @@ A common homelab layout: Kuma and a web server (nginx, or an inner Caddy) at hom
 
    Point it at a folder your web server already serves, for example the folder behind `/health/`. The existing chain of proxies then carries the file to the public Caddy unchanged. If the writer's user can't write to that folder, the installer asks before changing anything: it can give that user access to that one folder (`acl`) or run the writer as the folder's owner (`owner`). At the end it prints the exact command for step 2.
 
-2. **On the public Caddy, add the token check.** Pick the mode that matches your setup:
+2. **On the public proxy, add the token check.** The steps below use Caddy; nginx works the same way, and the other proxies get their lines printed with the steps to add them. Pick the mode that matches your setup:
 
    | Mode | Use it when |
    |---|---|
@@ -136,6 +150,8 @@ Every question can be answered ahead of time with an environment variable, e.g. 
 | Variable | Part | Meaning |
 |---|---|---|
 | `ROLE` | both | `all`, `writer` or `route` (same as `--writer-only` / `--route-only`) |
+| `PROXY` | check | `caddy` (default), `nginx`, `npm`, `traefik`, `apache`, `haproxy` or `other` |
+| `NGINX_SITE` | check | nginx: the file with the `server { }` for your domain, if the installer doesn't find it |
 | `DOMAIN` | check | domain the watch connects to (required) |
 | `STATUS_PATH` | check | path of the status file, default `/health/status.json` |
 | `ROUTE` | check | `file`, `check-only` or `proxy` (required when the writer is elsewhere) |
@@ -146,7 +162,7 @@ Every question can be answered ahead of time with an environment variable, e.g. 
 | `CADDYFILE`, `CADDY_SNIPPET` | check | default `/etc/caddy/Caddyfile` and `wrist-check.caddy` next to it |
 | `EDIT_CADDYFILE=no` | check | don't touch the Caddyfile; print the import line to add instead |
 | `SKIP_VALIDATE=yes` | check | skip `caddy validate` and rely on the reload (a failed reload is still rolled back) |
-| `RELOAD_CMD` | check | how to reload Caddy, e.g. `"sudo systemctl reload caddy"` |
+| `RELOAD_CMD` | check | how to reload Caddy or nginx, e.g. `"sudo systemctl reload caddy"` |
 | `SNIPPET_OUT` | check | with `--print-snippet`: write the lines to this file |
 | `KUMA_URL` | writer | Uptime Kuma as seen from this machine, default `http://127.0.0.1:3001` |
 | `KUMA_SLUG` | writer | the status page's slug, the last part of `/status/<slug>` (required, checked against Kuma) |
@@ -167,7 +183,7 @@ DOWN monitors come first, then SLOW ones. Within each, the groups in `PRIORITY_G
 
 **Per-monitor settings (optional).** Two Kuma tags tune single monitors: `slow_ms` with a value (that monitor's own SLOW limit, 0 = never SLOW) and `priority` with the value `high` (listed before everything else). The status page only passes tags along with **Show Tags** turned on, and that also shows the tags to anyone who can open the page. If you'd rather keep tags hidden, leave it off and use `PRIORITY_GROUPS` and `SLOW_MS` instead.
 
-Not using Caddy? Any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
+Using something not listed? Pick `other`: any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
 
 ## Watch setup
 
@@ -274,7 +290,7 @@ app/src/main/java/uk/debil/status/
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 server/
-  install.sh              server setup: status writer + timer and/or the Caddy token check, guided or scripted
+  install.sh              server setup: status writer + timer and/or the token check for Caddy, nginx and others, guided or scripted
   kuma-status.py          writes status.json from an Uptime Kuma status page
 secrets.properties.example  optional build-time default URL + token
 keystore.properties.example optional release signing key
