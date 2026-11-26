@@ -14,6 +14,8 @@ final class Status {
     final Kind kind;
     final List<String> problems;   // e.g. "PKVault DOWN", "Jellyfin SLOW"
     final String checkedAt;        // "HH:MM": status.json's title (last check / last update)
+    /** Working services from the optional "up" array; empty when the server doesn't send it. */
+    final List<String> up = new ArrayList<>();
 
     private Status(Kind kind, List<String> problems, String checkedAt) {
         this.kind = kind;

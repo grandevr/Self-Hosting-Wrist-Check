@@ -16,13 +16,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Scrollable list of everything that's down or slow. Opened by tapping the complication (or from
+ * Scrollable list of everything that's down or slow, then (if the server sends them) what's up. Opened by tapping the complication (or from
  * the app list). Opening it, or tapping "Refresh", also refreshes the complication right away.
  * Scrolls with touch or the rotating bezel.
  */
 public class ProblemsActivity extends Activity {
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final int GREY = 0xFFAAAAAA;
+    private static final int UP_GREEN = 0xFF8FD9A8;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private ScrollView scroll;
@@ -77,13 +78,24 @@ public class ProblemsActivity extends Activity {
         list.addView(label(s.shortText(), 26, s.color(), true));
 
         List<String> lines = s.detailLines();
-        if (lines.isEmpty()) {
+        if (lines.isEmpty() && s.up.isEmpty() && s.kind == Status.Kind.OK) {
             list.addView(label("Everything is up", 15, 0xFFFFFFFF, false));
         }
         for (String line : lines) {
             TextView row = label(line, 16, 0xFFFFFFFF, false);
             row.setPadding(0, dp(6), 0, dp(6));
             list.addView(row);
+        }
+
+        if (!s.up.isEmpty()) {
+            TextView header = label("UP · " + s.up.size(), 12, GREY, false);
+            header.setPadding(0, dp(12), 0, dp(2));
+            list.addView(header);
+            for (String name : s.up) {
+                TextView row = label(name, 15, UP_GREEN, false);
+                row.setPadding(0, dp(4), 0, dp(4));
+                list.addView(row);
+            }
         }
 
         String footer = s.footer();

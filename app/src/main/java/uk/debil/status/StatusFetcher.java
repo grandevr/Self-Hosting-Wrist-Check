@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 final class StatusFetcher {
     private static final String TAG = "DebilStatus";
     private static final int TIMEOUT_MS = 8000;
-    private static final int MAX_BYTES = 16 * 1024;
+    private static final int MAX_BYTES = 32 * 1024;
     private static final Pattern HH_MM = Pattern.compile("\\d{1,2}:\\d{2}");
 
     private StatusFetcher() {}
@@ -67,18 +67,23 @@ final class StatusFetcher {
             return Status.kumaError(checkedAt);
         }
 
-        List<String> problems = new ArrayList<>();
-        JSONArray arr = json.optJSONArray("problems");
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                String p = arr.optString(i, "").trim();
-                if (!p.isEmpty()) problems.add(p);
-            }
+        List<String> problems = strings(json.optJSONArray("problems"));
+        Status status = problems.isEmpty()
+                ? Status.ok(checkedAt)
+                : Status.problems(problems, checkedAt);
+        // Optional: names of working services. Older status.json without it still works.
+        status.up.addAll(strings(json.optJSONArray("up")));
+        return status;
+    }
+
+    private static List<String> strings(JSONArray arr) {
+        List<String> out = new ArrayList<>();
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            String v = arr.optString(i, "").trim();
+            if (!v.isEmpty()) out.add(v);
         }
-        if (problems.isEmpty()) {
-            return Status.ok(checkedAt);
-        }
-        return Status.problems(problems, checkedAt);
+        return out;
     }
 
     private static String readBody(InputStream in) throws Exception {

@@ -28,6 +28,16 @@ Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30)
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
 
+## Optional: list working services
+
+If `status.json` includes an `up` array with the names of the services that are working, the list screen shows them under the problems (header `UP · n`). Without the field everything works as before.
+
+```json
+{"short":"PKVault DOWN","title":"20:16","count":1,"problems":["PKVault DOWN"],"up":["Immich","Jellyfin","Nextcloud"],"updated":1795637760}
+```
+
+Use plain service names (no ` UP` suffix), in the order you want them shown. Leave slow and down services out of `up`, since they're already in `problems`. The complication ignores this field.
+
 ## Build
 
 Requirements: JDK 17+, Android SDK with platform 36 (Android Studio's SDK is fine; point to it with `ANDROID_HOME` or a `local.properties` containing `sdk.dir=...`). Gradle 9.2.1 and Android Gradle Plugin 9.0.0 come via the wrapper.
