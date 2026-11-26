@@ -6,7 +6,7 @@ import java.util.Locale;
 
 /** Parsed status.json plus how the complication should word it. */
 final class Status {
-    enum Kind { OK, PROBLEMS, KUMA_ERROR, STALE, OFFLINE }
+    enum Kind { OK, PROBLEMS, KUMA_ERROR, STALE, OFFLINE, SETUP }
 
     /** status.json is rewritten every minute; older than this means its timer has stopped. */
     static final long STALE_AFTER_SECONDS = 5 * 60;
@@ -28,6 +28,8 @@ final class Status {
     static Status kumaError(String checkedAt) { return new Status(Kind.KUMA_ERROR, new ArrayList<>(), checkedAt); }
     static Status stale(String lastCheck) { return new Status(Kind.STALE, new ArrayList<>(), lastCheck); }
     static Status offline() { return new Status(Kind.OFFLINE, new ArrayList<>(), ""); }
+    /** Not set up yet: no URL/token on the watch and none built in. */
+    static Status setup() { return new Status(Kind.SETUP, new ArrayList<>(), ""); }
 
     static Status preview() { return ok("21:47"); }
 
@@ -54,6 +56,7 @@ final class Status {
         switch (kind) {
             case STALE: return checkedAt.isEmpty() ? "" : "Last update " + checkedAt;
             case OFFLINE: return "No connection";
+            case SETUP: return "";
             default: return checkedAt.isEmpty() ? "" : "Checked " + checkedAt;
         }
     }
@@ -80,6 +83,7 @@ final class Status {
                 return down > 0 ? down + " DOWN" : "SLOW";
             case KUMA_ERROR: return "KUMA";
             case STALE: return "STALE";
+            case SETUP: return "SETUP";
             default: return "OFFLINE";
         }
     }
@@ -93,6 +97,7 @@ final class Status {
                 return problems.size() > 1 ? name + " +" + (problems.size() - 1) : name;
             case KUMA_ERROR: return "NOT READABLE";
             case STALE: return checkedAt.isEmpty() ? "NO UPDATE" : "SINCE " + checkedAt;
+            case SETUP: return "TAP HERE";
             default: return "NO CONNECTION";
         }
     }
@@ -103,6 +108,7 @@ final class Status {
             case PROBLEMS: return problems.get(0);
             case KUMA_ERROR: return "Uptime Kuma not readable";
             case STALE: return "Status not updating";
+            case SETUP: return "Tap to set up";
             default: return "Server unreachable";
         }
     }

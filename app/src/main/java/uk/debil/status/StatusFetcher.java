@@ -1,5 +1,6 @@
 package uk.debil.status;
 
+import android.content.Context;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -26,27 +27,74 @@ final class StatusFetcher {
 
     private StatusFetcher() {}
 
-    static Status fetch() {
+    /** Fetches with the configured URL and token. Returns Status.setup() if the app isn't set up. */
+    static Status fetch(Context ctx) {
+        Config.Creds creds;
+        try {
+            creds = Config.load(ctx);
+        } catch (Config.UnreadableException e) {
+            Log.w(TAG, "Stored token couldn't be read");
+            return Status.offline();
+        }
+        if (creds == null) return Status.setup();
+        return check(creds.url, creds.token).status;
+    }
+
+    /** Result of one request: the Status to show, plus a message for the setup screens. */
+    static final class Result {
+        final boolean ok;          // got a 200 with a readable status.json
+        final Status status;
+        final String message;      // human-readable outcome (no secrets)
+        Result(boolean ok, Status status, String message) {
+            this.ok = ok; this.status = status; this.message = message;
+        }
+    }
+
+    /** Fetches status.json with the given URL and token. Used both for the complication and to test setup. */
+    static Result check(String url, String token) {
         HttpURLConnection conn = null;
         try {
-            conn = (HttpURLConnection) new URL(BuildConfig.STATUS_URL).openConnection();
+            conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setConnectTimeout(TIMEOUT_MS);
             conn.setReadTimeout(TIMEOUT_MS);
             conn.setUseCaches(false);
-            conn.setRequestProperty("Authorization", "Bearer " + BuildConfig.STATUS_TOKEN);
+            conn.setInstanceFollowRedirects(false); // don't carry the token to another host
+            conn.setRequestProperty("Authorization", "Bearer " + token);
             conn.setRequestProperty("Accept", "application/json");
 
             int code = conn.getResponseCode();
             if (code != 200) {
                 Log.w(TAG, "status.json returned HTTP " + code);
-                return Status.offline();
+                return new Result(false, Status.offline(), httpMessage(code));
             }
-            return parse(readBody(conn.getInputStream()));
+            Status s;
+            try {
+                s = parse(readBody(conn.getInputStream()));
+            } catch (Exception e) {
+                Log.w(TAG, "status.json unreadable: " + e.getClass().getSimpleName());
+                return new Result(false, Status.offline(),
+                        "The server answered, but not with a status.json file (or it's over 32 KB).");
+            }
+            return new Result(true, s, "Connected. The watch shows: " + s.shortText());
         } catch (Exception e) {
             Log.w(TAG, "status.json fetch failed: " + e.getClass().getSimpleName());
-            return Status.offline();
+            return new Result(false, Status.offline(),
+                    "Couldn't reach the server (" + e.getClass().getSimpleName() + ").");
         } finally {
             if (conn != null) conn.disconnect();
+        }
+    }
+
+    private static String httpMessage(int code) {
+        switch (code) {
+            case 404: return "The server returned 404. Check the URL, and the token: the server hides the file without the right one.";
+            case 401:
+            case 403: return "The server refused the token (HTTP " + code + ").";
+            case 301:
+            case 302:
+            case 307:
+            case 308: return "The server redirected (HTTP " + code + "). Use the final https:// URL.";
+            default: return "The server returned HTTP " + code + ".";
         }
     }
 

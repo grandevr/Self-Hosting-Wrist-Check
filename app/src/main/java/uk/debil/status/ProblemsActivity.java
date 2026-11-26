@@ -1,6 +1,7 @@
 package uk.debil.status;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -63,7 +64,7 @@ public class ProblemsActivity extends Activity {
         loading = true;
         Refresh.complication(getApplicationContext());
         EXECUTOR.execute(() -> {
-            Status s = StatusFetcher.fetch();
+            Status s = StatusFetcher.fetch(getApplicationContext());
             main.post(() -> {
                 loading = false;
                 if (isFinishing() || isDestroyed()) return;
@@ -112,6 +113,12 @@ public class ProblemsActivity extends Activity {
             load();
         });
         list.addView(refresh);
+
+        TextView setup = label(s.kind == Status.Kind.SETUP ? "Set up" : "Settings", 13,
+                s.kind == Status.Kind.SETUP ? 0xFF8AB4F8 : GREY, s.kind == Status.Kind.SETUP);
+        setup.setPadding(dp(16), dp(4), dp(16), dp(12));
+        setup.setOnClickListener(v -> startActivity(new Intent(this, SetupActivity.class)));
+        list.addView(setup);
         scroll.scrollTo(0, 0);
     }
 

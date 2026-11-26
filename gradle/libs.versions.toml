@@ -1,9 +1,11 @@
 [versions]
 androidGradlePlugin = "9.0.0"
 complicationsDataSource = "1.2.1"
+zxing = "3.5.3"
 
 [libraries]
 wear-complications-data-source = { group = "androidx.wear.watchface", name = "watchface-complications-data-source", version.ref = "complicationsDataSource" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 
 
 [plugins]

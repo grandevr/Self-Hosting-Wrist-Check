@@ -3,11 +3,15 @@
 
     <uses-feature android:name="android.hardware.type.watch" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Setup: bring up Wi-Fi and find the watch's address for the local setup page -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <application
         android:label="@string/app_name"
         android:icon="@drawable/ic_server"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
 
         <meta-data
             android:name="com.google.android.wearable.standalone"
@@ -43,5 +47,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Setup: QR code + local web page for entering the URL and token from a phone or computer -->
+        <activity
+            android:name=".SetupActivity"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault" />
+
+        <!-- Setup fallback: type the URL and token on the watch -->
+        <activity
+            android:name=".ManualSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@android:style/Theme.DeviceDefault" />
     </application>
 </manifest>
