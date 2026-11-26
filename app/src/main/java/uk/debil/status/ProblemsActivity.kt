@@ -67,10 +67,24 @@ class ProblemsActivity : ComponentActivity() {
                     isOpen = { g -> toggled[g.name] ?: g.problems.isNotEmpty() },
                     onToggle = { g, open -> toggled[g.name] = !open },
                     onRefresh = { load(force = true) },
-                    onSettings = { startActivity(Intent(this, SetupActivity::class.java)) },
+                    onSettings = { startActivity(Intent(this, SettingsActivity::class.java)) },
+                    onSetup = { startActivity(Intent(this, SetupActivity::class.java)) },
+                    onService = ::openDetail,
                 )
             }
         }
+    }
+
+    /** Opens the detail screen with what the last status.json said: no extra request. */
+    private fun openDetail(label: String) {
+        val s = status ?: return
+        val d = s.detailFor(label) ?: return
+        startActivity(
+            Intent(this, DetailActivity::class.java)
+                .putExtra(DetailActivity.EXTRA_NAME, Detail.nameOf(label))
+                .putExtra(DetailActivity.EXTRA_DETAIL, d.json)
+                .putExtra(DetailActivity.EXTRA_CHECKED, s.checkedAt)
+        )
     }
 
     override fun onResume() {
@@ -110,7 +124,13 @@ private fun ProblemsScreen(
     onToggle: (Group, Boolean) -> Unit,
     onRefresh: () -> Unit,
     onSettings: () -> Unit,
+    onSetup: () -> Unit,
+    onService: (String) -> Unit,
 ) {
+    // Rows can be tapped only for services the server sent detail for.
+    val tap: (String) -> (() -> Unit)? = { label ->
+        if (status?.detailFor(label) != null) ({ onService(label) }) else null
+    }
     val listState = rememberTransformingLazyColumnState()
     val spec = rememberTransformationSpec()
     AppScaffold {
@@ -156,15 +176,15 @@ private fun ProblemsScreen(
                         }
                         if (open) {
                             for (p in g.problems) {
-                                item { ServiceRow(p, problemColor(p), Modifier.transformedHeight(this, spec)) }
+                                item { ServiceRow(p, problemColor(p), Modifier.transformedHeight(this, spec), tap(p)) }
                             }
                             for (name in g.up) {
-                                item { ServiceRow(name, StatusColors.Up, Modifier.transformedHeight(this, spec)) }
+                                item { ServiceRow(name, StatusColors.Up, Modifier.transformedHeight(this, spec), tap(name)) }
                             }
                         }
                     }
                 } else {
-                    flatList(status, spec)
+                    flatList(status, spec, tap)
                 }
 
                 val footer = status.footer()
@@ -179,7 +199,7 @@ private fun ProblemsScreen(
                         Icon(painterResource(R.drawable.ic_settings), contentDescription = null)
                     }
                     if (setup) {
-                        FilledTonalButton(onClick = onSettings, modifier = modifier,
+                        FilledTonalButton(onClick = onSetup, modifier = modifier,
                             transformation = SurfaceTransformation(spec), icon = icon,
                             label = { Text("Set up") })
                     } else {
@@ -243,13 +263,14 @@ private fun GroupButton(
 private fun TransformingLazyColumnScope.flatList(
     status: Status,
     spec: androidx.wear.compose.material3.lazy.TransformationSpec,
+    tap: (String) -> (() -> Unit)?,
 ) {
     val lines = status.detailLines()
     if (lines.isEmpty() && status.up.isEmpty() && status.kind == Status.Kind.OK) {
         item { Caption("Everything is up", Modifier.transformedHeight(this, spec)) }
     }
     if (status.kind == Status.Kind.PROBLEMS) {
-        for (p in lines) item { ServiceRow(p, problemColor(p), Modifier.transformedHeight(this, spec)) }
+        for (p in lines) item { ServiceRow(p, problemColor(p), Modifier.transformedHeight(this, spec), tap(p)) }
     } else {
         for (line in lines) item { Caption(line, Modifier.transformedHeight(this, spec), MaterialTheme.colorScheme.onSurface) }
     }
@@ -260,7 +281,7 @@ private fun TransformingLazyColumnScope.flatList(
             }
         }
         for (name in status.up) {
-            item { ServiceRow(name, StatusColors.Up, Modifier.transformedHeight(this, spec)) }
+            item { ServiceRow(name, StatusColors.Up, Modifier.transformedHeight(this, spec), tap(name)) }
         }
     }
 }
