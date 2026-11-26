@@ -9,6 +9,8 @@
 #   ... | sudo bash -s -- --route-only               on the Caddy machine (edits the Caddyfile, reloads)
 #   ... | bash -s -- --print-snippet                 no root: print the Caddy lines to paste in yourself
 #
+# Any of these with --dry-run: look around, ask, and show the plan, without changing anything.
+#
 # Later:
 #   --show        print the URL and token (to set up another watch); nothing prints the token otherwise
 #   --rotate      make a new token (every watch must be set up again)
@@ -24,18 +26,18 @@
 # What it installs (as root):
 #   /etc/wrist-check/env                settings
 #   /etc/wrist-check/token              the token, readable by root only
-#   /etc/caddy/wrist-check.caddy        route role: the Caddy snippet, imported in your site block
+#   /etc/caddy/wrist-check.caddy        route role: the token check, imported in your site's part of the Caddyfile
 #   /usr/local/bin/wrist-check-status   writer role: kuma-status.py
 #   wrist-check-status.service/.timer   writer role: runs the writer every minute
 #   /var/lib/wrist-check/status.json    writer role: the file the watch reads (OUT changes it)
 #
 # Every question can be answered ahead of time with an environment variable; without a terminal
 # (or with NONINTERACTIVE=yes) the required ones must be given, nothing is guessed. See the README.
-#   Route:  DOMAIN  STATUS_PATH  ROUTE=file|check-only|proxy  UPSTREAM  TOKEN_FILE  TOKEN
-#           CADDYFILE  CADDY_SNIPPET  EDIT_CADDYFILE  SKIP_VALIDATE  RELOAD_CMD  ALLOW_EXISTING_ROUTE
-#           SNIPPET_OUT (with --print-snippet: write to this file instead of stdout)
-#   Writer: KUMA_URL  KUMA_SLUG  OUT  SLOW_MS  SLOW_RUNS  PENDING=ignore|slow|down  PRIORITY_GROUPS
-#           WRITER_USER  WRITER_SRC  SKIP_KUMA_CHECK
+#   Route:  DOMAIN  STATUS_PATH  ROUTE=file|check-only|proxy  UPSTREAM  PROTECT=file|folder
+#           TOKEN_FILE  TOKEN  OLD_CHECK=disable|keep  CADDYFILE  CADDY_SNIPPET  EDIT_CADDYFILE
+#           SKIP_VALIDATE  RELOAD_CMD  SNIPPET_OUT (with --print-snippet: write to this file)
+#   Writer: KUMA_URL  KUMA_SLUG  OUT  OUT_ACCESS=acl|owner  SLOW_MS  SLOW_RUNS  PENDING=ignore|slow|down
+#           PRIORITY_GROUPS  WRITER_USER  WRITER_SRC  SKIP_KUMA_CHECK
 #   Both:   ROLE=all|writer|route  CONF_DIR
 # Needs: bash and coreutils. Writer: python3, systemd. Route: Caddy. curl only to pipe this script.
 
@@ -56,7 +58,7 @@ DEFAULT_OUT=/var/lib/wrist-check/status.json
 DATA_DIR=/var/lib/wrist-check
 WRITER_BIN=${WRITER_BIN:-/usr/local/bin/wrist-check-status}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
-SETTINGS="ROLE DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER"
+SETTINGS="ROLE DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM PROTECT KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER OUT_ACCESS"
 TMP_DIR=""
 USED_LOCAL_WRITER=""
 exec 3>&1   # messages; moved to stderr by --print-snippet so stdout is only the snippet
@@ -183,11 +185,18 @@ token_note() {
 
 # ---------------------------------------------------------------------------------------- caddy
 
+# The path the token check covers: just the status file, or everything in its folder.
+protect_path() {
+  if [ "${PROTECT:-file}" = folder ] && [ "${STATUS_PATH%/*}" != "" ]; then echo "${STATUS_PATH%/*}/*"
+  else echo "$STATUS_PATH"; fi
+}
+
 snippet_text() {
-  local how="this script"; [ "$ACTION" = print ] && how="install.sh --print-snippet"
+  local how="install.sh" pp; pp=$(protect_path)
   case "$ROUTE" in
     file) cat <<CADDY
-# Wrist Check, from $how (ROUTE=file). Serves $OUT only with the right bearer token, 404 otherwise.
+# Wrist Check ($how, ROUTE=file): serves $OUT for $STATUS_PATH, only with the right token.
+# Anything else gets 404.
 handle $STATUS_PATH {
 	@wristcheck_denied not header Authorization "Bearer $TOKEN"
 	respond @wristcheck_denied 404
@@ -199,20 +208,20 @@ handle $STATUS_PATH {
 CADDY
     ;;
     check-only) cat <<CADDY
-# Wrist Check, from $how (ROUTE=check-only). Answers 404 for $STATUS_PATH without the right bearer
-# token. With the token, the request goes on to this site's own handlers (its reverse_proxy), so this
-# belongs at the top level of the site block, which must not route the path through handle/route blocks.
+# Wrist Check ($how, ROUTE=check-only): requests for $pp without the right token get 404.
+# Requests with it carry on to this site's own reverse_proxy. Keep these lines at the top level of
+# the site (not inside a handle or route section), or the check is skipped.
 @wristcheck_denied {
-	path $STATUS_PATH
+	path $pp
 	not header Authorization "Bearer $TOKEN"
 }
 respond @wristcheck_denied 404
 CADDY
     ;;
     proxy) cat <<CADDY
-# Wrist Check, from $how (ROUTE=proxy). Answers 404 without the right bearer token and sends
-# requests with it to $UPSTREAM (the token itself isn't passed on).
-handle $STATUS_PATH {
+# Wrist Check ($how, ROUTE=proxy): requests for $pp without the right token get 404.
+# Requests with it go to $UPSTREAM (without the token).
+handle $pp {
 	@wristcheck_denied not header Authorization "Bearer $TOKEN"
 	respond @wristcheck_denied 404
 	reverse_proxy $UPSTREAM {
@@ -224,49 +233,140 @@ CADDY
   esac
 }
 
-site_re() { # ERE for the first line of DOMAIN's site block: "example.com {", "a.com, example.com:443 {"
+# --- Reading the Caddyfile ---------------------------------------------------------------------
+# The checks below look at one listing of the site's config, one line per Caddyfile line:
+#     file <US> line number <US> depth <US> text          (US is the \037 character)
+# It holds the DOMAIN section of the Caddyfile ("example.com { ... }") and every file that section
+# imports at its top level. depth 1 is the top level inside the section; imported files count as
+# depth 1 too, because that's where their lines end up.
+
+US=$'\037'
+
+site_re() { # matches the line that opens DOMAIN's section: "example.com {", "a.com, example.com:443 {"
   local esc; esc=$(printf '%s' "$DOMAIN" | sed 's/[.*]/\\&/g')
   printf '^([^#{]*[ ,])?(https?://)?%s(:[0-9]+)?([ ,][^{]*)?[[:space:]]*\\{[[:space:]]*$' "$esc"
 }
 
-site_block() { # prints "lineno<US>depth<US>line" (US = \037) for DOMAIN's site block (depth 1 = top level inside it)
-  [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] || return 0
-  SITE_RE=$(site_re) awk '
-    !inside && $0 ~ ENVIRON["SITE_RE"] { inside = 1; depth = 0 }
+list_lines() { # list_lines FILE START_DEPTH [START_RE]: the listing for FILE, or for one section of it
+  START_RE=${3:-} awk -v file="$1" -v depth="$2" '
+    BEGIN { re = ENVIRON["START_RE"]; inside = (re == "") }
+    !inside && $0 ~ re { inside = 1; depth = 0 }
     inside {
-      line = $0; sub(/#.*/, "", line)
-      o = gsub(/\{/, "{", line); c = gsub(/\}/, "}", line)
-      print NR "\037" (c > o ? depth - c + o : depth) "\037" $0
-      depth += o - c
-      if (depth <= 0) exit
-    }' "$CADDYFILE"
+      code = $0; sub(/#.*/, "", code)                       # ignore comments
+      opens = gsub(/\{/, "{", code); closes = gsub(/\}/, "}", code)
+      shown = (closes > opens) ? depth - closes + opens : depth   # a closing line belongs to the outer level
+      print file "\037" NR "\037" shown "\037" $0
+      depth += opens - closes
+      if (re != "" && depth <= 0) exit                       # end of the section
+    }' "$1"
 }
 
-existing_routes() { # lines in the site block (not our import) that mention the path, plus every line
-  # using a named matcher that matches it, e.g. "@health_denied { path /health/* ... }" and "respond @health_denied"
-  local pat=${STATUS_PATH%/*}
-  [ -n "$pat" ] || pat=$STATUS_PATH
-  site_block | awk -F'\037' -v pat="$pat" -v imp="$IMPORT_LINE" '
-    { n++; ln[n] = $1; d[n] = $2; code = $3; sub(/#.*/, "", code); gsub(/^[ \t]+|[ \t]+$/, "", code); c[n] = code }
+site_block() { # the DOMAIN section of the Caddyfile only
+  [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] || return 0
+  list_lines "$CADDYFILE" 0 "$(site_re)"
+}
+
+site_lines() { # the DOMAIN section plus the files it imports (except our own snippet)
+  local blk file num depth text pat f
+  blk=$(site_block)
+  [ -n "$blk" ] || return 0
+  printf '%s\n' "$blk"
+  while IFS="$US" read -r file num depth text; do
+    [ "$depth" = 1 ] && [[ "$text" =~ ^[[:space:]]*import[[:space:]]+([^[:space:]#]+) ]] || continue
+    pat=${BASH_REMATCH[1]}
+    case "$pat" in /*) ;; *) pat="$(dirname "$CADDYFILE")/$pat" ;; esac
+    while IFS= read -r f; do
+      [ -f "$f" ] && [ -r "$f" ] || continue          # "import name" of a (snippet) is not a file
+      [ "$(readlink -f "$f")" = "$(readlink -f "$CADDY_SNIPPET")" ] && continue
+      list_lines "$f" 1
+    done < <(compgen -G "$pat" || true)
+  done <<< "$blk"
+}
+
+# caddy_scan old      the old token checks for the protected folder, as "file<US>first<US>last<US>what"
+# caddy_scan handles  top-level handle/route sections (other than old token checks), as "file<US>line<US>text"
+#
+# An old token check is a named matcher whose definition mentions the folder (e.g. "/health") and the
+# Authorization header, plus the respond/abort/error lines that use it, plus any handle/route section
+# for the folder that checks Authorization itself. Error pages (handle_errors) and headers are left out:
+# they don't block requests, so they can stay.
+caddy_scan() {
+  local dir=${STATUS_PATH%/*}
+  [ -n "$dir" ] || dir=$STATUS_PATH
+  site_lines | awk -F'\037' -v mode="$1" -v dir="$dir" '
+    { n++; F[n] = $1; L[n] = $2; D[n] = $3
+      t = $4; sub(/#.*/, "", t); gsub(/^[ \t]+|[ \t]+$/, "", t); T[n] = t }
     END {
-      blk = ""                            # named matchers whose definition mentions the path
+      # 1. For each line that opens a block, find the line that closes it (E[i]; E[i] = i for one line).
       for (i = 1; i <= n; i++) {
-        nm = ""
-        if (match(c[i], /^@[A-Za-z0-9_-]+/)) { nm = substr(c[i], 1, RLENGTH); if (c[i] ~ /\{$/) blk = nm }
-        else if (d[i] <= 1) blk = ""      # back at the top level: the matcher block has ended
-        if (index(c[i], pat)) { if (nm != "") m[nm] = 1; if (blk != "") m[blk] = 1 }
+        if (F[i] != prev) { sp = 0; prev = F[i] }
+        x = T[i]; opens = gsub(/\{/, "{", x); x = T[i]; closes = gsub(/\}/, "}", x)
+        E[i] = i
+        for (k = 0; k < opens; k++) stack[++sp] = i
+        for (k = 0; k < closes && sp > 0; k++) E[stack[sp--]] = i
       }
-      for (i = 2; i <= n; i++) {
-        hit = index(c[i], pat) > 0
-        for (k in m) { s = c[i] " "; while ((p = index(s, k)) > 0) { ch = substr(s, p + length(k), 1); if (ch !~ /[A-Za-z0-9_-]/) { hit = 1; break } s = substr(s, p + length(k)) } }
-        if (hit && c[i] != "" && c[i] != imp) print "    line " ln[i] ":  " c[i]
+      # 2. Mark the lines inside handle_errors sections: those are error pages, never a token check.
+      for (i = 1; i <= n; i++) if (T[i] ~ /^handle_errors([ \t{]|$)/) for (k = i; k <= E[i]; k++) ERR[k] = 1
+      # 3. Named matchers: does the definition mention the folder and the Authorization header?
+      for (i = 1; i <= n; i++) {
+        if (ERR[i] || !match(T[i], /^@[A-Za-z0-9_-]+/)) continue
+        name = substr(T[i], 1, RLENGTH); body = ""
+        for (k = i; k <= E[i]; k++) { body = body " " T[k]; DEF[k] = 1 }
+        if (index(body, dir)) PATH[name] = 1
+        if (body ~ /Authorization/) AUTH[name] = 1
+        defs[name] = defs[name] " " i
+      }
+      for (name in defs) if (PATH[name] && AUTH[name]) TOKEN[name] = 1
+      # 4. Report.
+      for (i = 1; i <= n; i++) {
+        if (ERR[i]) continue
+        if (mode == "old") {
+          if (DEF[i] && match(T[i], /^@[A-Za-z0-9_-]+/) && TOKEN[substr(T[i], 1, RLENGTH)]) {
+            print F[i] "\037" L[i] "\037" L[E[i]] "\037" "matcher " substr(T[i], 1, RLENGTH) " (checks a token)"; i = E[i]; continue
+          }
+          if (!DEF[i] && T[i] ~ /^(respond|abort|error)[ \t]+@/) {
+            split(T[i], w, /[ \t]+/)
+            if (TOKEN[w[2]]) { print F[i] "\037" L[i] "\037" L[E[i]] "\037" T[i]; i = E[i]; continue }
+          }
+          if (D[i] == 1 && T[i] ~ /^(handle|handle_path|route)[ \t]/) {
+            split(T[i], w, /[ \t]+/); body = ""
+            for (k = i; k <= E[i]; k++) body = body " " T[k]
+            if (index(w[2], dir) == 1 && body ~ /Authorization/) { print F[i] "\037" L[i] "\037" L[E[i]] "\037" w[1] " " w[2] " section (checks a token)"; i = E[i] }
+          }
+        } else if (mode == "handles" && D[i] == 1 && T[i] ~ /^(handle|handle_path|route)([ \t{]|$)/) {
+          body = ""
+          for (k = i; k <= E[i]; k++) body = body " " T[k]
+          if (body !~ /Authorization/) print F[i] "\037" L[i] "\037" T[i]
+        }
       }
     }'
 }
 
-handle_blocks() { # handle/handle_path/route blocks in the site block: those run before a top-level respond
-  site_block | awk -F'\037' '$2 == 1 && $3 ~ /^[ \t]*(handle|handle_path|route)([ \t{]|$)/ { l = $3; gsub(/^[ \t]+/, "", l); print "    line " $1 ":  " l }'
+old_checks() { caddy_scan old; }
+handle_blocks() { caddy_scan handles; }
+
+show_old_checks() { # show_old_checks LIST [INDENT]: human-readable list of old_checks
+  local file first last what ind=${2:-    }
+  while IFS="$US" read -r file first last what; do
+    [ -n "$file" ] || continue
+    if [ "$first" = "$last" ]; then msg "$ind$file, line $first:  $what"
+    else msg "$ind$file, lines $first-$last:  $what"; fi
+  done <<< "$1"
 }
+
+show_handles() {
+  local file num text
+  while IFS="$US" read -r file num text; do
+    [ -n "$file" ] && msg "    $file, line $num:  $text"
+  done <<< "$(handle_blocks)"
+}
+
+old_folder_wide() { # did the old check cover the whole folder ("/health/*")?
+  local dir=${STATUS_PATH%/*}
+  [ -n "$dir" ] && site_lines | cut -d"$US" -f4- | grep -v '^[[:space:]]*#' | grep -qF -- "$dir/*"
+}
+
+# --- Changing the Caddy config -------------------------------------------------------------------
 
 caddy_bin() { # the binary the caddy unit runs (it may be a custom build with extra modules)
   local p=""
@@ -305,94 +405,134 @@ reload_caddy() { # 0 reloaded, 1 reload failed, 2 not attempted
 
 backup_dir() { if [ -w "$(dirname "$CADDYFILE")" ]; then dirname "$CADDYFILE"; else echo "$CONF_DIR"; fi; }
 
-# Puts the Caddyfile and snippet back as they were before this run.
+# Every file this run changes is copied first (once), so restore() can put them all back.
+BACKED_UP=()
+SN_NEW=no
+backup() { # backup FILE: copies it once per run; BK is where the copy is
+  local f=$1
+  BK="$(backup_dir)/$(basename "$f").wrist-check.bak"
+  if [[ " ${BACKED_UP[*]} " != *" $f "* ]]; then
+    ( umask 077; cp "$f" "$BK" )
+    BACKED_UP+=("$f")
+  fi
+}
+
 restore() {
-  [ -n "${CF_BACKUP:-}" ] && [ -f "$CF_BACKUP" ] && cat "$CF_BACKUP" > "$CADDYFILE"
-  if [ -n "${SN_BACKUP:-}" ] && [ -f "$SN_BACKUP" ]; then cat "$SN_BACKUP" > "$CADDY_SNIPPET"
-  elif [ "${SN_NEW:-}" = yes ]; then rm -f "$CADDY_SNIPPET"; fi
+  local f
+  for f in "${BACKED_UP[@]}"; do cat "$(backup_dir)/$(basename "$f").wrist-check.bak" > "$f"; done
+  [ "$SN_NEW" = yes ] && rm -f "$CADDY_SNIPPET"
+  true
 }
 
 can_write_snippet() { [ -w "$(dirname "$CADDY_SNIPPET")" ] || { [ -f "$CADDY_SNIPPET" ] && [ -w "$CADDY_SNIPPET" ]; }; }
 
-write_snippet() {
-  can_write_snippet || die "can't write $CADDY_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
-  SN_BACKUP=""; SN_NEW=yes
-  if [ -f "$CADDY_SNIPPET" ]; then
-    SN_NEW=no; SN_BACKUP="$(backup_dir)/$(basename "$CADDY_SNIPPET").wrist-check.bak"
-    ( umask 077; cp "$CADDY_SNIPPET" "$SN_BACKUP" )
-  fi
-  ( umask 077; snippet_text > "$CADDY_SNIPPET" )
-  # Caddy runs as user "caddy" on most installs: let it read the snippet, nobody else.
-  if getent group caddy >/dev/null 2>&1 && chgrp caddy "$CADDY_SNIPPET" 2>/dev/null; then
-    chmod 640 "$CADDY_SNIPPET"
+caddy_readable() { # caddy_readable FILE: let Caddy (group caddy) read FILE, keep others out where possible
+  if getent group caddy >/dev/null 2>&1 && chgrp caddy "$1" 2>/dev/null; then
+    chmod 640 "$1"
   else
-    chmod 644 "$CADDY_SNIPPET"
-    [ "$IS_ROOT" = yes ] || msg "Note: $CADDY_SNIPPET is readable by all local users (couldn't give it to group caddy)."
+    chmod 644 "$1"
+    [ "$IS_ROOT" = yes ] || msg "Note: $1 is readable by every local user, so Caddy can read it (it holds the token)."
   fi
 }
 
+write_snippet() {
+  can_write_snippet || die "can't write $CADDY_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
+  SN_NEW=yes
+  if [ -f "$CADDY_SNIPPET" ]; then SN_NEW=no; backup "$CADDY_SNIPPET"; fi
+  ( umask 077; snippet_text > "$CADDY_SNIPPET" )
+  caddy_readable "$CADDY_SNIPPET"
+}
+
+# Comments out the old token check (lines from old_checks), so it stops blocking requests. Nothing
+# is deleted: each line gets "# [wrist-check] " in front, and the files are backed up first.
+disable_old_checks() {
+  local file first last what done_files=""
+  while IFS="$US" read -r file first last what; do
+    [ -n "$file" ] || continue
+    [ -w "$file" ] || { restore; die "can't edit $file as $(id -un)."; }
+    backup "$file"
+    awk -v a="$first" -v z="$last" 'NR >= a && NR <= z { print "# [wrist-check] " $0; next } { print }' "$file" > "$file.wrist-check.tmp"
+    cat "$file.wrist-check.tmp" > "$file"; rm -f "$file.wrist-check.tmp"
+    [[ " $done_files " == *" $file "* ]] || done_files="$done_files $file"
+  done <<< "$1"
+  for file in $done_files; do
+    backup "$file"
+    msg "Turned off the old token check in $file: its lines now start with '# [wrist-check]' (old version: $BK)."
+  done
+}
+
+has_import() { [ -f "$CADDYFILE" ] && grep -qxF -- "$IMPORT_LINE" <(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$CADDYFILE"); }
+
+add_import() {
+  [ -w "$CADDYFILE" ] || { restore; die "can't edit $CADDYFILE as $(id -un). Use sudo, or --print-snippet."; }
+  local first
+  first=$(site_block | head -n1 | cut -d"$US" -f2)
+  backup "$CADDYFILE"
+  awk -v n="$first" -v imp="$IMPORT_LINE" '{ print } NR == n { print "\t" imp }' "$BK" > "$CADDYFILE"
+  msg "Added '$IMPORT_LINE' to the $DOMAIN part of $CADDYFILE (old version: $BK)."
+}
+
 manual_import() {
-  msg "Add this line inside the \"${DOMAIN:-your site} { ... }\" block of $CADDYFILE yourself, then reload Caddy:"
+  msg "Add this line inside the \"${DOMAIN:-your site} { ... }\" part of $CADDYFILE yourself, then reload Caddy:"
   msg ""
   msg "    $IMPORT_LINE"
   msg ""
 }
 
-# Checks the site block, writes the snippet, adds the import line after "<domain> {", validates and
-# reloads. On any failure the Caddyfile and snippet go back to how they were.
-apply_route() {
-  local found first ok=0 rc=0
-  CF_BACKUP=""
-  if [ -r "$CADDYFILE" ] && [ -z "$(site_block)" ]; then
-    msg "Couldn't find a \"$DOMAIN {\" block in $CADDYFILE."
-  fi
-  found=$(existing_routes)
-  if [ -n "$found" ] && ! is_yes "${ALLOW_EXISTING_ROUTE:-}"; then
-    die "the $DOMAIN block in $CADDYFILE already handles $STATUS_PATH:
-$found
-Two token checks with different tokens would answer 404 to every request. Remove those lines (and
-reload Caddy) first, or replace them with the output of --print-snippet. ALLOW_EXISTING_ROUTE=yes
-skips this check."
+# Runs the checks again (they were also asked about earlier), writes the snippet, turns off an old
+# check if that was chosen, adds the import line, validates and reloads. If validate or reload
+# fails, every changed file goes back to how it was.
+# Stops (before anything is changed) when the route can't work as asked.
+check_route() {
+  local old
+  old=$(old_checks)
+  if [ -n "$old" ] && [ "${OLD_CHECK:-}" != disable ] && [ "${OLD_CHECK:-}" != keep ]; then
+    msg "Your Caddy config already checks a token for $(dirname "$STATUS_PATH")/:"
+    show_old_checks "$old"
+    die "a second check with a different token would answer 404 to every request, so nothing was changed.
+Run again with OLD_CHECK=disable to have those lines commented out (backup kept, rolled back if Caddy
+complains), or remove them yourself. OLD_CHECK=keep adds the new check anyway."
   fi
   if [ "$ROUTE" = check-only ] && [ -n "$(handle_blocks)" ]; then
-    die "ROUTE=check-only needs the site's proxy at the top level of the $DOMAIN block, but it has:
-$(handle_blocks)
-Those run before the token check, so it would be skipped. Use ROUTE=proxy UPSTREAM=<host:port> instead."
+    msg "In the $DOMAIN part of $CADDYFILE, requests are passed on inside handle/route sections:"
+    show_handles
+    die "those run before a token check placed next to them, so check-only can't protect the file here.
+Use ROUTE=proxy with UPSTREAM=<where the file is served>: it handles $(protect_path) itself."
   fi
+  true
+}
 
+apply_route() {
+  local old ok=0 rc=0
+  if [ -r "$CADDYFILE" ] && [ -z "$(site_block)" ]; then
+    msg "Couldn't find the \"$DOMAIN {\" part in $CADDYFILE."
+  fi
+  old=$(old_checks)
   write_snippet
+  [ -n "$old" ] && [ "$OLD_CHECK" = disable ] && disable_old_checks "$old"
 
-  if grep -qxF -- "$IMPORT_LINE" <(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$CADDYFILE" 2>/dev/null); then
+  if has_import; then
     ok=1
   elif [ ! -f "$CADDYFILE" ] || [ -z "$(caddy_bin)" ] || [ -z "$(site_block)" ]; then
     manual_import
+  elif is_yes "${EDIT_CADDYFILE:-yes}"; then
+    add_import; ok=1
   else
-    ask EDIT_CADDYFILE "Add '$IMPORT_LINE' to the $DOMAIN block in $CADDYFILE? (a backup is kept)" "${EDIT_CADDYFILE:-yes}"
-    if ! is_yes "$EDIT_CADDYFILE"; then
-      manual_import
-    else
-      [ -w "$CADDYFILE" ] || { restore; die "can't edit $CADDYFILE as $(id -un). Use sudo, or --print-snippet."; }
-      CF_BACKUP="$(backup_dir)/$(basename "$CADDYFILE").wrist-check.bak"
-      cp "$CADDYFILE" "$CF_BACKUP"
-      first=$(site_block | head -n1 | cut -d"$(printf '\037')" -f1)
-      awk -v n="$first" -v imp="$IMPORT_LINE" '{ print } NR == n { print "\t" imp }' "$CF_BACKUP" > "$CADDYFILE"
-      msg "Added '$IMPORT_LINE' to $CADDYFILE (old version: $CF_BACKUP)."
-      ok=1
-    fi
+    manual_import
   fi
 
-  if [ "$ok" = 1 ]; then
+  if [ "$ok" = 1 ] || [ "${#BACKED_UP[@]}" -gt 0 ]; then
     if ! caddy_validate; then
       restore
-      die "Caddy didn't accept the new config, so the Caddyfile and snippet were put back. If it only fails
-because the service gets settings this script can't see, run again with SKIP_VALIDATE=yes: the reload
-then does the check, and a failed reload is rolled back the same way."
+      die "Caddy didn't accept the new config, so every changed file was put back. If it only fails
+because the Caddy service gets settings this script can't see, run again with SKIP_VALIDATE=yes: the
+reload then does the check, and a failed reload is rolled back the same way."
     fi
     reload_caddy || rc=$?
     if [ "$rc" = 1 ]; then
       restore
       reload_caddy >/dev/null 2>&1 || true
-      die "reloading Caddy failed, so the Caddyfile and snippet were put back (and reloaded)."
+      die "reloading Caddy failed, so every changed file was put back (and Caddy reloaded)."
     elif [ "$rc" = 2 ]; then
       msg "Reload Caddy yourself (e.g. sudo systemctl reload caddy), or set RELOAD_CMD=\"...\" next time."
     fi
@@ -401,10 +541,10 @@ then does the check, and a failed reload is rolled back the same way."
 
 ask_route() {
   suggest DOMAIN "$D_DOMAIN"
-  ask DOMAIN "Public domain the watch connects to (the Caddy site)" "${DOMAIN:-}"
-  [ -n "$DOMAIN" ] || [ "$ACTION" = print ] || need DOMAIN "Public domain the watch connects to (the Caddy site)" "for the status URL and to find the site block"
+  ask DOMAIN "Domain the watch connects to (as in https://<domain>/...)" "${DOMAIN:-}"
+  [ -n "$DOMAIN" ] || [ "$ACTION" = print ] || need DOMAIN "Domain the watch connects to (as in https://<domain>/...)" "it's part of the status URL"
   [ -z "$DOMAIN" ] || check DOMAIN '^[A-Za-z0-9*.-]+$' "a host name like example.com"
-  ask STATUS_PATH "Path of the status file" "${STATUS_PATH:-/health/status.json}"
+  ask STATUS_PATH "Path of the status file on that domain" "${STATUS_PATH:-/health/status.json}"
   case "$STATUS_PATH" in /*) ;; *) STATUS_PATH="/$STATUS_PATH" ;; esac
   check STATUS_PATH '^/[A-Za-z0-9._~/-]+$' "a URL path like /health/status.json"
   if [ "$ROLE" = all ]; then
@@ -413,25 +553,57 @@ ask_route() {
     if have_tty; then
       detect_route
       case "$D_ROUTE" in
-        check-only) msg "The $DOMAIN block sends requests on with a top-level reverse_proxy${D_UPSTREAM:+ ($D_UPSTREAM)}: check-only fits." ;;
-        proxy) msg "The $DOMAIN block uses handle/route blocks, so a top-level token check would be skipped: proxy fits." ;;
+        check-only) msg "This site already passes requests on to ${D_UPSTREAM:-another server}, so it only needs the token check (check-only)." ;;
+        proxy) msg "This site passes requests on inside handle/route sections, where an added check would be skipped, so proxy fits." ;;
       esac
       suggest ROUTE "$D_ROUTE"
+      msg "Where is the status file?
+  file        on this machine (the writer runs here, or you copy the file here)
+  check-only  on another machine this site already passes requests to: just check the token here
+  proxy       on another machine: check the token here, then fetch the file from an address you give"
     fi
-    have_tty && msg "How Caddy here answers $STATUS_PATH:
-  file        serve the status file from this machine (you write it there yourself)
-  check-only  check the token, then let the site's existing reverse_proxy handle the request
-  proxy       check the token, then send the request to an upstream you name"
-    need ROUTE "Route mode (file / check-only / proxy)" "file, check-only or proxy"
+    need ROUTE "Answer (file / check-only / proxy)" "file, check-only or proxy"
   fi
   check ROUTE '^(file|check-only|proxy)$' "file, check-only or proxy"
   if [ "$ROUTE" = proxy ]; then
     suggest UPSTREAM "$D_UPSTREAM"
-    need UPSTREAM "Upstream that serves the status file (host:port or URL)" "where requests with the token go"
+    need UPSTREAM "Address that serves the status file (host:port or URL)" "where requests with the token go"
     check UPSTREAM '^[][A-Za-z0-9.:/_-]+$' "host:port or a URL like http://10.0.0.5:8080"
+  fi
+  if [ "$ROUTE" != file ] && [ "$STATUS_PATH" != "/${STATUS_PATH##*/}" ]; then
+    have_tty && old_folder_wide && suggest PROTECT folder
+    ask PROTECT "Protect only ${STATUS_PATH##*/}, or everything in $(dirname "$STATUS_PATH")/ (file / folder)" "${PROTECT:-file}"
+    check PROTECT '^(file|folder)$' "file or folder"
+  else
+    PROTECT="file"
   fi
   [ "$ROUTE" = file ] && OUT=${OUT:-$DEFAULT_OUT}
   status_url
+}
+
+# An old token check found earlier: with a terminal, ask what to do; without one, OLD_CHECK decides.
+ask_old_check() {
+  [ -n "${ALLOW_EXISTING_ROUTE:-}" ] && is_yes "$ALLOW_EXISTING_ROUTE" && OLD_CHECK=${OLD_CHECK:-keep}
+  local old; old=$(old_checks)
+  [ -n "$old" ] && [ -z "${OLD_CHECK:-}" ] && have_tty || return 0
+  msg ""
+  msg "Your Caddy config already checks a token for $(dirname "$STATUS_PATH")/:"
+  show_old_checks "$old"
+  msg "Two checks with different tokens would block every request, so the old one has to go. Error pages
+(handle_errors) and headers aren't affected and stay as they are."
+  local writable=yes file
+  while IFS="$US" read -r file _; do [ -w "$file" ] || writable=no; done <<< "$old"
+  if [ "$ACTION" = install ] && [ "$writable" = yes ]; then
+    msg "  disable  comment those lines out (nothing deleted, backup kept, undone if Caddy complains)"
+    msg "  print    show the new lines, and change the config yourself"
+    msg "  stop     change nothing"
+    ask OLD_CHECK "Answer (disable / print / stop)" "disable"
+  else
+    ask OLD_CHECK "Show the new lines, to put in place of those yourself? (print / stop)" "print"
+  fi
+  check OLD_CHECK '^(disable|print|stop|keep)$' "disable, print or stop"
+  [ "$OLD_CHECK" = stop ] && die "stopped, nothing changed."
+  true
 }
 
 # --------------------------------------------------------------------------------------- writer
@@ -462,13 +634,8 @@ ask_writer() {
   ask PRIORITY_GROUPS "Status page groups whose problems come first, comma-separated (empty = page order)" "${PRIORITY_GROUPS:-}"
   [[ "$PRIORITY_GROUPS" == *[\"\\\$\`]* ]] && die "PRIORITY_GROUPS can't contain quotes, backslashes, \$ or backticks"
   WRITER_USER=${WRITER_USER:-wrist-check}
-  local out_dir; out_dir=$(dirname "$OUT")
-  if [ -d "$out_dir" ] && [ "$out_dir" != "$DATA_DIR" ] && ! writable_by "$WRITER_USER" "$out_dir"; then
-    have_tty && msg "$WRITER_USER can't write to $out_dir (owned by $(stat -c %U "$out_dir")). The writer can run as that owner instead."
-    [ "$WRITER_USER" = wrist-check ] && have_tty && WRITER_USER=$(stat -c %U "$out_dir")
-    ask WRITER_USER "User the writer runs as" "$WRITER_USER"
-  fi
   check WRITER_USER '^[a-z_][a-z0-9_-]*$' "a user name"
+  plan_out_access
   command -v python3 >/dev/null || die "python3 is needed for the status writer"
   fetch_writer
   check_kuma
@@ -503,6 +670,40 @@ check_kuma() {
   esac
 }
 
+# Decides, before anything changes, how the writer gets to write into OUT's folder:
+#   new     the folder doesn't exist yet: it's created for the writer
+#   ok      the writer's user can already write there (or it's this script's own folder)
+#   acl     give the writer's user write access to that one folder (setfacl)
+#   owner   run the writer as the folder's owner instead
+plan_out_access() {
+  local dir owner; dir=$(dirname "$OUT")
+  if [ ! -e "$dir" ]; then OUT_ACCESS=new; return 0; fi
+  [ -d "$dir" ] || die "$dir isn't a folder"
+  if [ "$dir" = "$DATA_DIR" ] || writable_by "$WRITER_USER" "$dir"; then
+    [ "${OUT_ACCESS:-}" = acl ] || OUT_ACCESS=ok
+    return 0
+  fi
+  owner=$(stat -c %U "$dir")
+  if [ -z "${OUT_ACCESS:-}" ] || [ "$OUT_ACCESS" = ok ] || [ "$OUT_ACCESS" = new ]; then
+    OUT_ACCESS=""
+    if have_tty; then
+      msg ""
+      msg "The writer runs as the user $WRITER_USER, which can't write to $dir (it belongs to $owner)."
+      command -v setfacl >/dev/null && msg "  acl    let $WRITER_USER write to that folder only (nothing else changes)"
+      msg "  owner  run the writer as $owner instead"
+      if command -v setfacl >/dev/null; then ask OUT_ACCESS "Answer (acl / owner)" "acl"; else ask OUT_ACCESS "Answer (owner / stop)" "owner"; fi
+      [ "$OUT_ACCESS" = stop ] && die "stopped, nothing changed."
+    else
+      die "the writer's user $WRITER_USER can't write to $dir (it belongs to $owner), and nothing was changed.
+Set OUT_ACCESS=acl to let $WRITER_USER write to that folder (needs setfacl), or OUT_ACCESS=owner to run
+the writer as $owner."
+    fi
+  fi
+  check OUT_ACCESS '^(acl|owner)$' "acl or owner"
+  if [ "$OUT_ACCESS" = owner ]; then WRITER_USER=$owner
+  else command -v setfacl >/dev/null || die "OUT_ACCESS=acl needs setfacl (package acl), or use OUT_ACCESS=owner"; fi
+}
+
 writable_by() { # writable_by USER DIR
   if [ "$1" = root ]; then return 0; fi
   id "$1" >/dev/null 2>&1 || return 1
@@ -519,19 +720,17 @@ install_writer() {
   out_dir=$(dirname "$OUT")
   case "$out_dir/" in /home/*|/root/*|/run/user/*) protect_home=read-only ;; esac
 
-  install -m 755 "$WRITER_SRC" "$WRITER_BIN"
   if [ "$WRITER_USER" = wrist-check ] && ! id wrist-check >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin wrist-check
   fi
   id "$WRITER_USER" >/dev/null 2>&1 || die "user $WRITER_USER doesn't exist"
-  if [ ! -d "$out_dir" ]; then
-    install -d -m 755 -o "$WRITER_USER" "$out_dir"
-  elif [ "$out_dir" = "$DATA_DIR" ]; then
-    chown "$WRITER_USER" "$out_dir"
-  elif ! writable_by "$WRITER_USER" "$out_dir"; then
-    die "$WRITER_USER can't write to $out_dir. Let it (e.g. setfacl -m u:$WRITER_USER:rwx $out_dir), or run the
-writer as the folder's owner with WRITER_USER=$(stat -c %U "$out_dir")."
-  fi
+  case "$OUT_ACCESS" in
+    new) install -d -m 755 -o "$WRITER_USER" "$out_dir" ;;
+    acl) setfacl -m "u:$WRITER_USER:rwx" "$out_dir" && msg "Let $WRITER_USER write to $out_dir (ACL)." ;;
+  esac
+  [ "$out_dir" = "$DATA_DIR" ] && chown "$WRITER_USER" "$out_dir"
+  writable_by "$WRITER_USER" "$out_dir" || die "$WRITER_USER still can't write to $out_dir (check the folders above it)"
+  install -m 755 "$WRITER_SRC" "$WRITER_BIN"
 
   cat > "$UNIT_DIR/wrist-check-status.service" <<UNIT
 [Unit]
@@ -645,15 +844,22 @@ detect_caddy() {
   done < <(caddy_sites)
 }
 
-detect_route() { # needs DOMAIN and STATUS_PATH: how the site serves things today
-  local dom=${DOMAIN:-$D_DOMAIN}
+detect_route() { # needs DOMAIN and STATUS_PATH: how the site passes requests on today
+  local dom=${DOMAIN:-$D_DOMAIN} lines
   [ -n "$dom" ] || return 0
-  local blk; blk=$(DOMAIN=$dom site_block)
-  [ -n "$blk" ] || return 0
-  D_UPSTREAM=$(printf '%s\n' "$blk" | awk -F'\037' '$3 ~ /^[ \t]*reverse_proxy[ \t]/ { n = split($3, w, /[ \t]+/); for (i = 1; i <= n; i++) if (w[i] == "reverse_proxy") { t = w[i+1]; if (t ~ /^[@\/]/) t = w[i+2]; print t; exit } }')
-  D_UPSTREAM=${D_UPSTREAM%\{}
+  lines=$(DOMAIN=$dom site_lines)
+  [ -n "$lines" ] || return 0
+  # The first "reverse_proxy <address>" in the site (the suggested upstream), e.g. 10.0.0.5:8080.
+  D_UPSTREAM=$(printf '%s\n' "$lines" | awk -F'\037' '
+    $4 ~ /^[ \t]*reverse_proxy[ \t]/ {
+      n = split($4, w, /[ \t]+/)
+      for (i = 1; i <= n; i++) if (w[i] == "reverse_proxy") {
+        t = w[i + 1]; if (t ~ /^[@\/*]/) t = w[i + 2]     # skip a matcher like /api/* or @name
+        sub(/\{$/, "", t); print t; exit
+      }
+    }')
   if [ -n "$(DOMAIN=$dom handle_blocks)" ]; then D_ROUTE=proxy
-  elif printf '%s\n' "$blk" | awk -F'\037' '$2 == 1 && $3 ~ /^[ \t]*reverse_proxy[ \t]/ { f = 1 } END { exit !f }'; then D_ROUTE=check-only
+  elif printf '%s\n' "$lines" | cut -d"$US" -f3- | grep -q "^1${US}[[:space:]]*reverse_proxy[[:space:]]"; then D_ROUTE=check-only
   else D_ROUTE="file"; fi
 }
 
@@ -706,25 +912,68 @@ suggest() { # suggest VAR VALUE: VALUE becomes the default answer if VAR has non
   [ -n "${!1:-}" ] || [ -z "$2" ] || printf -v "$1" '%s' "$2"
 }
 
-confirm_plan() {
-  have_tty || return 0
-  msg ""
+token_desc() {
+  case "$TOKEN_SOURCE" in
+    new) echo "a new random one, kept in $TOKEN_PATH" ;;
+    saved) echo "keep the current one" ;;
+    *) echo "reuse the one from $TOKEN_SOURCE" ;;
+  esac
+}
+
+plan() { # what this run is about to change, in plain words
   msg "Plan for this machine:"
-  [ "$ROLE" = route ] || msg "  Writer:  reads status page '$KUMA_SLUG' at $KUMA_URL every minute, writes $OUT
-           SLOW after $SLOW_RUNS checks over ${SLOW_MS} ms, retrying monitors: $PENDING${PRIORITY_GROUPS:+, first: $PRIORITY_GROUPS}"
-  [ "$ROLE" = writer ] || msg "  Route:   $STATUS_URL, ROUTE=$ROUTE${UPSTREAM:+ -> $UPSTREAM}, snippet $CADDY_SNIPPET imported in the $DOMAIN block"
+  if [ "$ROLE" != route ]; then
+    msg "  Status writer"
+    msg "    - every minute: read the Kuma status page '$KUMA_SLUG' ($KUMA_URL) and write $OUT"
+    msg "    - SLOW after $SLOW_RUNS slow checks in a row (over $SLOW_MS ms); retrying monitors: $PENDING${PRIORITY_GROUPS:+; listed first: $PRIORITY_GROUPS}"
+    id "$WRITER_USER" >/dev/null 2>&1 || msg "    - create the system user $WRITER_USER"
+    case "$OUT_ACCESS" in
+      new) msg "    - create the folder $(dirname "$OUT")" ;;
+      acl) msg "    - let $WRITER_USER write to $(dirname "$OUT") (an ACL on that folder)" ;;
+      owner) msg "    - run as $WRITER_USER, who owns $(dirname "$OUT")" ;;
+    esac
+    msg "    - install $WRITER_BIN and the wrist-check-status timer"
+  fi
+  if [ "$ROLE" != writer ]; then
+    local old; old=$(old_checks)
+    msg "  Token check in Caddy, for $STATUS_URL"
+    msg "    - token: $(token_desc)"
+    msg "    - write $CADDY_SNIPPET ($ROUTE, protects $(protect_path))"
+    [ -n "$old" ] && [ "${OLD_CHECK:-}" = disable ] && msg "    - comment out the old token check ($(grep -c . <<< "$old") places)"
+    has_import || msg "    - add '$IMPORT_LINE' to the $DOMAIN part of $CADDYFILE"
+    msg "    - check the config and reload Caddy; if either fails, put everything back"
+  fi
+  msg "  Settings saved in $ENV_FILE"
+}
+
+confirm_plan() {
+  msg ""
+  plan
+  if is_yes "${DRY_RUN:-}"; then msg ""; msg "Dry run: nothing was changed."; exit 0; fi
+  have_tty || return 0
   local go=""
   ask go "Go ahead? (yes / no)" "yes"
   is_yes "$go" || die "stopped, nothing changed. Run again to change the answers."
+}
+
+next_route_steps() {
+  local line="curl -fsSL $REPO_RAW/install.sh"
+  msg ""
+  msg "Next steps:"
+  msg "  1. On the machine the watch connects to (the one with the public Caddy), add the token check:"
+  msg "       $line | sudo bash -s -- --route-only"
+  msg "     If you can't use sudo there:"
+  msg "       $line | bash -s -- --print-snippet"
+  msg "  2. Then, on that machine, print the URL and token for the watch: the same line with --show."
 }
 
 ask_existing_token() { # with a terminal, offer to reuse a token instead of making a new one
   [ "$TOKEN_SOURCE" = new ] && have_tty || return 0
   local t="" keep=""
   # A hand-written route in the site block may already check a token: keeping it keeps the watches working.
-  t=$(site_block | cut -d"$(printf '\037')" -f3- | sed -n 's/.*"Bearer \([A-Za-z0-9._~+\/=-]\{16,512\}\)".*/\1/p' | head -n1)
+  t=$(site_lines | cut -d"$US" -f4- | grep -v '^[[:space:]]*#' | sed -n 's/.*"Bearer \([A-Za-z0-9._~+\/=-]\{16,512\}\)".*/\1/p' | head -n1)
   if [ -n "$t" ]; then
-    ask keep "The $DOMAIN block already checks a token (${t:0:4}...). Use the same one, so watches keep working? (yes / no)" "yes"
+    ask keep "Your Caddy config already uses a token (${t:0:4}...). Keep it, so watches already set up keep working? (yes / no)" "yes"
     if is_yes "$keep"; then TOKEN=$t; TOKEN_SOURCE="your existing Caddy route"; return 0; fi
     t=""
   fi
@@ -768,60 +1017,72 @@ print_snippet() {
   fi
   resolve_token
   ask_existing_token
-  local saved=yes
+  local saved=yes old="" n=1
   save_token || saved=no
-  if [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ]; then
-    local found; found=$(existing_routes)
-    [ -n "$found" ] && msg "The $DOMAIN block in $CADDYFILE already handles $STATUS_PATH. Replace these lines with the snippet:
-$found
-"
-    [ "$ROUTE" = check-only ] && [ -n "$(handle_blocks)" ] && msg "Warning: these blocks run before a top-level token check, so check-only wouldn't protect the path. Use ROUTE=proxy:
-$(handle_blocks)
-"
+  [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] && old=$(old_checks)
+  if [ "$ROUTE" = check-only ] && [ -n "${DOMAIN:-}" ] && [ -n "$(handle_blocks)" ]; then
+    msg "Warning: in the $DOMAIN part of $CADDYFILE, requests are passed on inside handle/route sections:"
+    show_handles
+    msg "A check-only block next to them would be skipped. Use ROUTE=proxy instead."
+    msg ""
   fi
   if [ -n "${SNIPPET_OUT:-}" ]; then
     ( umask 077; snippet_text > "$SNIPPET_OUT" )
-    msg "Snippet written to $SNIPPET_OUT (it holds the token: delete it once it's in place)."
+    caddy_readable "$SNIPPET_OUT"
   else
     snippet_text
   fi
+  msg ""
   if [ "$saved" = yes ]; then token_note
   elif [ "$TOKEN_SOURCE" = new ]; then msg "Couldn't save the new token in $TOKEN_PATH: it's only in the snippet."; fi
-  msg "Put it inside the site block (or save it as a file there and 'import' it), then check and reload:
-    caddy validate --config $CADDYFILE --adapter caddyfile && sudo systemctl reload caddy"
-  [ "$ROUTE" = check-only ] && msg "check-only needs the site's reverse_proxy at the top level of the block, not inside handle/route."
+  msg ""
+  msg "Next steps:"
+  if [ -n "$old" ]; then
+    msg "  $n. Your Caddy config already checks a token for $(dirname "$STATUS_PATH")/. Comment out or delete these"
+    msg "     lines (error pages and headers can stay):"
+    show_old_checks "$old" "       "
+    n=$((n + 1))
+  fi
+  if [ -n "${SNIPPET_OUT:-}" ]; then
+    msg "  $n. The new lines are in $SNIPPET_OUT. Add this line at the top level of the \"${DOMAIN:-your site} { ... }\""
+    msg "     part of $CADDYFILE:   import $SNIPPET_OUT"
+  else
+    msg "  $n. Paste the new lines (above) at the top level of the \"${DOMAIN:-your site} { ... }\" part of $CADDYFILE."
+  fi
+  n=$((n + 1))
+  msg "  $n. Check and reload:  caddy validate --config $CADDYFILE --adapter caddyfile && sudo systemctl reload caddy"
+  n=$((n + 1))
+  msg "  $n. Set up the watch: run this script again with --show to print the URL and token."
   [ -n "${STATUS_URL:-}" ] && { ( save_env ) 2>/dev/null || true; }
   true
 }
 
 install_all() {
   load_env
-  [ "$IS_ROOT" = yes ] || [ "$ROLE" = route ] || die "run as root (sudo), or use --route-only / --print-snippet"
+  [ "$IS_ROOT" = yes ] || [ "$ROLE" = route ] || is_yes "${DRY_RUN:-}" || die "run as root (sudo), or use --route-only / --print-snippet"
   msg "Wrist Check server setup"
   msg ""
   detect_all
   if [ -z "$ROLE" ]; then
-    have_tty && msg "What runs here? all = status writer + Caddy route on this machine, writer = only the
-Kuma status writer (Caddy elsewhere), route = only the Caddy token check (writer elsewhere)."
-    ask ROLE "Install (all / writer / route)" "${D_ROLE:-all}"
+    have_tty && msg "What should run here?
+  all     everything on this machine (Kuma and Caddy are both here)
+  writer  only the part that reads Kuma (the watch connects to Caddy on another machine)
+  route   only the token check in Caddy (Kuma is on another machine)"
+    ask ROLE "Answer (all / writer / route)" "${D_ROLE:-all}"
   fi
   check ROLE '^(all|writer|route)$' "all, writer or route"
-  if [ "$ROLE" = route ] && ! can_write_snippet; then
+  if [ "$ROLE" = route ] && ! can_write_snippet && ! is_yes "${DRY_RUN:-}"; then
     die "can't write $CADDY_SNIPPET as $(id -un). Use sudo, or --print-snippet to add the lines by hand."
   fi
 
-  [ "$ROLE" = writer ] || ask_route
-  if [ "$ROLE" != writer ] && have_tty && [ -n "$(existing_routes)" ] && ! is_yes "${ALLOW_EXISTING_ROUTE:-}"; then
-    msg "The $DOMAIN block in $CADDYFILE already handles $STATUS_PATH:"
-    msg "$(existing_routes)"
-    msg "A second token check would break it, so those lines must be replaced. The safest way is by hand."
-    local p=""
-    ask p "Print the replacement lines to paste in place of those? (yes / no = stop)" "yes"
-    is_yes "$p" || die "stopped, nothing changed."
-    ACTION=print; ROUTE_ASKED=yes; print_snippet; exit 0
+  if [ "$ROLE" != writer ]; then
+    ask_route
+    ask_old_check
+    if [ "${OLD_CHECK:-}" = print ]; then ACTION=print; ROUTE_ASKED=yes; print_snippet; exit 0; fi
   fi
   [ "$ROLE" = route ] || ask_writer
   if [ "$ROLE" != writer ]; then
+    check_route
     resolve_token
     ask_existing_token
   fi
@@ -838,29 +1099,30 @@ Kuma status writer (Caddy elsewhere), route = only the Caddy token check (writer
     msg ""
     token_note "readable by $(id -un) only"
     msg "Status URL: $STATUS_URL"
-    if [ "$SHOW" = yes ]; then show; else msg "Print the URL and token for a watch with --show."; fi
+    if [ "$SHOW" = yes ]; then show
+    else msg "Last step, set up the watch: run this script again with --show to print the URL and token."; fi
   fi
   if [ "$ROLE" != route ] && [ -n "$D_OTHER_TIMERS" ]; then
     msg ""
     msg "Once the watch shows the right status, turn off the older timer(s): systemctl disable --now $D_OTHER_TIMERS"
   fi
-  if [ "$ROLE" = writer ]; then
-    msg ""
-    msg "Next: on the machine with the public Caddy, run this script with --route-only (ROUTE=check-only"
-    msg "or proxy), or --print-snippet to add the token check by hand."
-  fi
+  [ "$ROLE" = writer ] && next_route_steps
+  true
 }
 
 rotate() {
   load_env
-  [ -n "${STATUS_PATH:-}" ] || die "no route set up here: run the installer (or --print-snippet) first"
+  [ -n "${STATUS_PATH:-}" ] || die "no token check set up here: run the installer (or --print-snippet) first"
   ROUTE=${ROUTE:-file}; [ "$ROUTE" = file ] && OUT=${OUT:-$DEFAULT_OUT}
   status_url
   resolve_token new
+  if is_yes "${DRY_RUN:-}"; then
+    msg "Would save a new token in $TOKEN_PATH$([ -f "$CADDY_SNIPPET" ] && echo ", rewrite $CADDY_SNIPPET and reload Caddy"). Dry run: nothing was changed."
+    exit 0
+  fi
   save_token || die "couldn't save the token in $TOKEN_PATH"
   if [ -f "$CADDY_SNIPPET" ]; then
     write_snippet
-    CF_BACKUP=""
     local rc=0
     caddy_validate || { restore; die "Caddy didn't accept the new snippet; it was put back."; }
     reload_caddy || rc=$?
@@ -876,26 +1138,42 @@ rotate() {
 
 uninstall() {
   load_env
-  local role=${ROLE_FLAG:-all}
-  if [ "$role" != route ]; then
-    if [ -f "$UNIT_DIR/wrist-check-status.timer" ] || [ -f "$WRITER_BIN" ]; then
-      [ "$IS_ROOT" = yes ] || die "removing the status writer needs root (sudo)"
-      systemctl disable --now wrist-check-status.timer 2>/dev/null || true
-      rm -f "$UNIT_DIR/wrist-check-status.service" "$UNIT_DIR/wrist-check-status.timer" "$WRITER_BIN"
-      systemctl daemon-reload 2>/dev/null || true
-      if [ "${OUT:-$DEFAULT_OUT}" = "$DEFAULT_OUT" ]; then rm -rf "$DATA_DIR"
-      else msg "Left $OUT in place (not this script's folder): delete it yourself if nothing serves it."; fi
-      id wrist-check >/dev/null 2>&1 && userdel wrist-check 2>/dev/null || true
-      msg "Status writer removed."
-    fi
+  local role=${ROLE_FLAG:-all} todo=() dir
+  dir=$(dirname "${OUT:-$DEFAULT_OUT}")
+  if [ "$role" != route ] && { [ -f "$UNIT_DIR/wrist-check-status.timer" ] || [ -f "$WRITER_BIN" ]; }; then
+    todo+=("the status writer: timer, $WRITER_BIN")
+    [ "$dir" = "$DATA_DIR" ] && todo+=("$DATA_DIR")
+    [ "${OUT_ACCESS:-}" = acl ] && todo+=("the ACL that lets ${WRITER_USER:-wrist-check} write to $dir")
+    id wrist-check >/dev/null 2>&1 && todo+=("the user wrist-check")
   fi
   if [ "$role" != writer ]; then
-    if [ -f "$CADDYFILE" ] && grep -qxF -- "$IMPORT_LINE" <(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$CADDYFILE"); then
+    has_import && todo+=("'$IMPORT_LINE' from $CADDYFILE")
+    [ -f "$CADDY_SNIPPET" ] && todo+=("$CADDY_SNIPPET")
+    [ -f "$TOKEN_PATH" ] && todo+=("the token ($TOKEN_PATH)")
+  fi
+  [ "$role" = all ] && [ -d "$CONF_DIR" ] && todo+=("the settings ($CONF_DIR)")
+  if [ "${#todo[@]}" = 0 ]; then msg "Nothing of Wrist Check's to remove here."; return 0; fi
+  msg "This removes:"
+  printf '  - %s\n' "${todo[@]}" >&3
+  if is_yes "${DRY_RUN:-}"; then msg "Dry run: nothing was changed."; exit 0; fi
+
+  if [ "$role" != route ] && { [ -f "$UNIT_DIR/wrist-check-status.timer" ] || [ -f "$WRITER_BIN" ]; }; then
+    [ "$IS_ROOT" = yes ] || die "removing the status writer needs root (sudo)"
+    systemctl disable --now wrist-check-status.timer 2>/dev/null || true
+    rm -f "$UNIT_DIR/wrist-check-status.service" "$UNIT_DIR/wrist-check-status.timer" "$WRITER_BIN"
+    systemctl daemon-reload 2>/dev/null || true
+    [ "${OUT_ACCESS:-}" = acl ] && command -v setfacl >/dev/null && setfacl -x "u:${WRITER_USER:-wrist-check}" "$dir" 2>/dev/null || true
+    if [ "$dir" = "$DATA_DIR" ]; then rm -rf "$DATA_DIR"
+    else msg "Left $OUT in place (not this script's folder): delete it yourself if nothing serves it."; fi
+    id wrist-check >/dev/null 2>&1 && userdel wrist-check 2>/dev/null || true
+    msg "Status writer removed."
+  fi
+  if [ "$role" != writer ]; then
+    if has_import; then
       [ -w "$CADDYFILE" ] || die "can't edit $CADDYFILE as $(id -un): use sudo"
-      local b; b="$(backup_dir)/$(basename "$CADDYFILE").wrist-check.bak"
-      cp "$CADDYFILE" "$b"
-      awk -v imp="$IMPORT_LINE" '{ l = $0; gsub(/^[ \t]+|[ \t]+$/, "", l) } l != imp' "$b" > "$CADDYFILE"
-      msg "Removed '$IMPORT_LINE' from $CADDYFILE (old version: $b)."
+      backup "$CADDYFILE"
+      awk -v imp="$IMPORT_LINE" '{ l = $0; gsub(/^[ \t]+|[ \t]+$/, "", l) } l != imp' "$BK" > "$CADDYFILE"
+      msg "Removed '$IMPORT_LINE' from $CADDYFILE (old version: $BK)."
     fi
     if [ -f "$CADDY_SNIPPET" ]; then
       rm -f "$CADDY_SNIPPET"
@@ -903,7 +1181,7 @@ uninstall() {
       [ "$rc" = 2 ] && msg "Reload Caddy yourself."
     fi
     rm -f "$TOKEN_PATH"
-    msg "Caddy route and token removed. Lines you pasted by hand (--print-snippet) stay: remove those yourself."
+    msg "Token check removed. Lines you pasted in by hand (--print-snippet) stay: remove those yourself."
   fi
   if [ "$role" = all ]; then rm -rf "$CONF_DIR"
   elif [ -f "$ENV_FILE" ]; then ROLE=$([ "$role" = writer ] && echo route || echo writer); save_env; fi
@@ -934,6 +1212,7 @@ main() {
       --writer-only) ROLE_FLAG=writer ;;
       --route-only) ROLE_FLAG=route ;;
       --show) SHOW=yes ;;
+      --dry-run) DRY_RUN=yes ;;
       --print-snippet) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=print ;;
       --rotate) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=rotate ;;
       --uninstall) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=uninstall ;;
@@ -952,7 +1231,7 @@ main() {
     uninstall) uninstall ;;
     install) install_all ;;
   esac
-  case "$ACTION" in install|uninstall|rotate) remove_self ;; esac
+  is_yes "${DRY_RUN:-}" || case "$ACTION" in install|uninstall|rotate) remove_self ;; esac
 }
 
 main "$@"
