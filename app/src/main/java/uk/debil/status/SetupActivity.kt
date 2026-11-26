@@ -132,6 +132,7 @@ class SetupActivity : ComponentActivity() {
 
     /** Asks Wear OS for Wi-Fi (it is usually off while the phone is connected over Bluetooth). */
     private fun requestWifi() {
+        releaseWifi() // never hold two Wi-Fi requests (Retry after a lost network)
         val req = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()

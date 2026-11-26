@@ -34,6 +34,11 @@ import java.util.concurrent.Executors;
 public class StatusDataSource extends ComplicationDataSourceService {
     private static final String TAG = "DebilStatus";
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
+    /**
+     * Reuse a result this young instead of asking the server again. The 15-minute period is far
+     * longer, so scheduled updates always fetch; this only absorbs bursts of extra requests.
+     */
+    private static final long REUSE_MS = 60_000;
 
     @Override
     public void onComplicationRequest(@NonNull ComplicationRequest request,
@@ -41,7 +46,7 @@ public class StatusDataSource extends ComplicationDataSourceService {
         final ComplicationType type = request.getComplicationType();
         final Context ctx = getApplicationContext();
         EXECUTOR.execute(() -> {
-            Status status = StatusFetcher.fetch(ctx);
+            Status status = StatusFetcher.fetch(ctx, REUSE_MS);
             try {
                 listener.onComplicationData(build(ctx, type, status));
             } catch (RemoteException e) {

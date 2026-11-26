@@ -52,8 +52,8 @@ android {
         applicationId = "uk.debil.status"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
         buildConfigField("String", "STATUS_URL", "\"${secret("STATUS_URL")}\"")
         buildConfigField("String", "STATUS_TOKEN", "\"${secret("STATUS_TOKEN")}\"")
     }
