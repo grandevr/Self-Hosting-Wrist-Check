@@ -16,9 +16,7 @@ jobs:
           java-version: 17
       # ubuntu-latest ships the Android SDK (ANDROID_HOME); AGP fetches platform 36 if missing.
       - uses: gradle/actions/setup-gradle@v4
-      # Placeholder secrets: CI only checks that the app compiles. This repo is public,
+      # No secrets.properties: the app is set up on the watch. This repo is public,
       # so never build with the real token here or upload an APK that contains it.
-      - name: Placeholder secrets.properties
-        run: cp secrets.properties.example secrets.properties
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --stacktrace

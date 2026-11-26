@@ -7,6 +7,8 @@ A tiny standalone Wear OS app (Java) that reads `status.json` from the homelab a
 
 Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30).
 
+Setup in short: run `server/install.sh` on the server, install the APK on the watch, add the complication, tap it, scan the QR code with your phone and paste the URL and token. Nothing secret is compiled into the app.
+
 ## What it shows
 
 | status.json | SHORT_TEXT text | SHORT_TEXT title | LONG_TEXT text | LONG_TEXT title |
@@ -17,10 +19,11 @@ Built for a Galaxy Watch8 (Wear OS 6), works on any Wear OS 3+ watch (minSdk 30)
 | `error` field (Kuma not readable) | `KUMA` | `NOT READABLE` | `Uptime Kuma not readable` | `Checked HH:MM` |
 | `updated` older than 5 min | `STALE` | `SINCE HH:MM` | `Status not updating` | `Last update HH:MM` |
 | fetch failed / non-200 | `OFFLINE` | `NO CONNECTION` | `Server unreachable` | `Homelab` |
+| not set up yet | `SETUP` | `TAP HERE` | `Tap to set up` | `Homelab` |
 
 - Both types carry a monochrome server icon.
 - Refreshes every 15 minutes (`UPDATE_PERIOD_SECONDS` 900). Opening the problem list (by tapping the complication) refreshes it right away via `ComplicationDataSourceUpdateRequester.requestUpdateAll()`.
-- Fetch: `GET STATUS_URL` with `Authorization: Bearer STATUS_TOKEN`, 8 s connect/read timeouts, response capped at 16 KB. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
+- Fetch: `GET <status URL>` with `Authorization: Bearer <token>`, 8 s connect/read timeouts, response capped at 32 KB, redirects not followed. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
 
 ## Problem list
 
@@ -38,18 +41,86 @@ If `status.json` includes an `up` array with the names of the services that are 
 
 Use plain service names (no ` UP` suffix), in the order you want them shown. Leave slow and down services out of `up`, since they're already in `problems`. The complication ignores this field.
 
+## Server setup
+
+The watch needs one URL that returns `status.json` only when the request carries the right bearer token (404 otherwise). One line sets that up on a Linux server running Caddy (and, optionally, Uptime Kuma):
+
+```
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash
+```
+
+Nothing to download or place by hand, and nothing left behind except what it installs: piped like this the installer never touches the disk, and it fetches the status writer into a temporary folder that's deleted at the end. (Run as a downloaded file, `sudo ./install.sh` deletes itself when done, unless it's inside a git checkout.)
+
+It asks for your domain, the path (default `/health/status.json`) and whether to install the status writer, then:
+
+- makes a random 64-character token and writes `/etc/caddy/wrist-check.caddy`, a snippet that serves the file only with that token;
+- adds `import wrist-check.caddy` to your domain's block in `/etc/caddy/Caddyfile` (asks first, keeps `Caddyfile.wrist-check.bak`, and puts the old file back if Caddy doesn't accept the result), then reloads Caddy;
+- optionally installs `kuma-status.py` as `/usr/local/bin/wrist-check-status` with a systemd timer that rewrites `/var/lib/wrist-check/status.json` every minute. It reads an Uptime Kuma **status page** over HTTP (public API, no Kuma login needed), so Kuma can run in Docker: point it at the published port, e.g. `http://127.0.0.1:3001`. Create a status page in Kuma with the monitors you want on your wrist and give the script its slug. DOWN monitors come first, then SLOW ones (Kuma "pending", or slower than `SLOW_MS`, default 2000 ms); monitors in maintenance are left out. Skip it if you already write the file yourself;
+- prints the URL and token to enter on the watch.
+
+Later, the same line with an option:
+
+```
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --show       # URL and token again
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --rotate     # new token, set watches up again
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --uninstall  # remove everything it added
+```
+
+Answers can also come from environment variables for a no-questions run, e.g. `curl ... | sudo DOMAIN=example.com KUMA_SLUG=homelab bash`. Settings live in `/etc/wrist-check/env`.
+
+Not using Caddy? Any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
+
+## Watch setup
+
+1. Install the APK (below) and add the **Homelab status** complication to your watch face. It shows `SETUP` / `TAP HERE`.
+2. Tap it. The watch turns on Wi-Fi and shows a QR code, an address like `192.168.1.42:8765` and a 6-digit PIN.
+3. Scan the QR code with your phone (or type the address into any browser on the same network). The page has the PIN filled in; paste the status URL and token and press **Test and save**.
+4. The watch fetches the URL with the token first and only saves if it gets a valid `status.json`, so you see "wrong token" or "can't reach server" right on the page. The complication updates straight away.
+
+No Wi-Fi, or a different network? Tap **Enter on watch** and type the URL and token on the watch (the Wear OS keyboard can take input from the paired phone, which helps with the long token).
+
+To change the URL or token later: open the status list (tap the complication) → **Settings** at the bottom.
+
+How it's kept safe:
+- The setup page is served by the watch itself, only while the setup screen is open (10 minutes at most), and only on its Wi-Fi address. Saving needs the PIN from the watch screen; after 5 wrong PINs a new one is drawn.
+- The page travels over your local network as plain HTTP (the watch can't get a certificate for a LAN address), so do this on your home network, not public Wi-Fi.
+- The token is stored encrypted with an AES key held in the Android Keystore, never logged, never shown again on the page, and not included in backups.
+- The status URL has to be `https://`.
+
+## Optional: categories
+
+If `status.json` includes a `groups` array, the list screen shows collapsible categories instead of the flat list. A collapsed category shows its name and `UP n • DOWN n` (plus `• SLOW n` when something is slow). Tap it to expand it and see its problems (red/amber) and working services (green). Categories with problems start expanded. Without `groups`, the flat list above is used.
+
+```json
+{
+  "short": "Sonarr DOWN", "title": "20:16", "count": 1,
+  "problems": ["Sonarr DOWN", "Radarr SLOW"],
+  "groups": [
+    {"name": "Media", "problems": ["Sonarr DOWN", "Radarr SLOW"], "up": ["Jellyfin", "Immich"]},
+    {"name": "Infra", "problems": [], "up": ["Caddy", "Uptime Kuma"]}
+  ],
+  "updated": 1795637760
+}
+```
+
+- `name`: the category (for example the Uptime Kuma group name). Put ungrouped monitors in a group like `"Other"`.
+- `problems`: the same `"<Name> DOWN"` / `"<Name> SLOW"` labels as the top-level `problems`, for this category only.
+- `up`: plain names of this category's working services.
+- Keep the top-level `problems` as it is: the complication still reads it.
+
+The status writer from `server/install.sh` fills in `groups` from the groups on your Uptime Kuma status page.
+
 ## Build
 
 Requirements: JDK 17+, Android SDK with platform 36 (Android Studio's SDK is fine; point to it with `ANDROID_HOME` or a `local.properties` containing `sdk.dir=...`). Gradle 9.2.1 and Android Gradle Plugin 9.0.0 come via the wrapper.
 
-1. Copy `secrets.properties.example` to `secrets.properties` and fill in `STATUS_URL` and `STATUS_TOKEN`. The build stops with a clear error if either is missing.
-2. Run:
-   ```
-   ./gradlew assembleDebug
-   ```
-   The APK lands in `app/build/outputs/apk/debug/app-debug.apk`.
+```
+./gradlew assembleDebug
+```
 
-Never commit or share `secrets.properties` or a built APK: the token is compiled into it. Both are gitignored. The GitHub Actions workflow only builds with the placeholder values from the example file to check that everything compiles.
+The APK lands in `app/build/outputs/apk/debug/app-debug.apk`. It contains no URL or token, so it's safe to share; every watch is set up as described above.
+
+Optional build-time default: copy `secrets.properties.example` to `secrets.properties` and fill in `STATUS_URL` and `STATUS_TOKEN`. The app then works without any watch setup, until something is entered on the watch (which wins). If the file exists, both values must be filled in or the build stops with a clear error. An APK built this way contains the token: don't share or commit it (both are gitignored). The GitHub Actions workflow builds without the file.
 
 ## Install on the watch
 
@@ -76,9 +147,17 @@ app/src/main/java/uk/debil/status/
   StatusDataSource.java   complication service, builds SHORT_TEXT / LONG_TEXT data
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
-  ProblemsActivity.java   scrollable full list, opened by tapping the complication
+  ProblemsActivity.java   scrollable full list (or categories), opened by tapping the complication
+  Group.java              one category from the optional "groups" field
   Refresh.java            asks Wear OS to update the complication now
+  Config.java             URL + token storage (token encrypted with an Android Keystore key)
+  SetupActivity.java      setup screen: Wi-Fi, QR code, address and PIN
+  SetupServer.java        the one-page web server the phone talks to during setup
+  ManualSetupActivity.java  fallback: type URL and token on the watch
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
-secrets.properties.example
+server/
+  install.sh              one-line server setup: token, Caddy snippet + import, status writer + timer
+  kuma-status.py          writes status.json from an Uptime Kuma status page
+secrets.properties.example  optional build-time default URL + token
 ```

@@ -29,6 +29,7 @@ import java.util.concurrent.Executors;
  *             title = check time (HH:MM) when all is up, otherwise the first problem's service name.
  * LONG_TEXT:  text "All up" or the first problem label, title "+N more" or "Checked HH:MM".
  * Tapping the complication opens ProblemsActivity (full list), which also refreshes the complication.
+ * Before the app is set up it shows "SETUP" / "TAP HERE" and tapping opens SetupActivity.
  */
 public class StatusDataSource extends ComplicationDataSourceService {
     private static final String TAG = "DebilStatus";
@@ -40,7 +41,7 @@ public class StatusDataSource extends ComplicationDataSourceService {
         final ComplicationType type = request.getComplicationType();
         final Context ctx = getApplicationContext();
         EXECUTOR.execute(() -> {
-            Status status = StatusFetcher.fetch();
+            Status status = StatusFetcher.fetch(ctx);
             try {
                 listener.onComplicationData(build(ctx, type, status));
             } catch (RemoteException e) {
@@ -60,7 +61,7 @@ public class StatusDataSource extends ComplicationDataSourceService {
         MonochromaticImage icon = new MonochromaticImage.Builder(
                 Icon.createWithResource(ctx, R.drawable.ic_server)).build();
         ComplicationText description = text(s.description());
-        PendingIntent tap = tapIntent(ctx);
+        PendingIntent tap = tapIntent(ctx, s.kind == Status.Kind.SETUP);
 
         if (type == ComplicationType.SHORT_TEXT) {
             return new ShortTextComplicationData.Builder(text(s.shortText()), description)
@@ -83,9 +84,10 @@ public class StatusDataSource extends ComplicationDataSourceService {
         return new PlainComplicationText.Builder(s).build();
     }
 
-    private static PendingIntent tapIntent(Context ctx) {
-        Intent intent = new Intent(ctx, ProblemsActivity.class);
-        return PendingIntent.getActivity(ctx, 0, intent,
+    /** Opens the problem list, or the setup screen while the app isn't set up yet. */
+    private static PendingIntent tapIntent(Context ctx, boolean needsSetup) {
+        Intent intent = new Intent(ctx, needsSetup ? SetupActivity.class : ProblemsActivity.class);
+        return PendingIntent.getActivity(ctx, needsSetup ? 1 : 0, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 }
