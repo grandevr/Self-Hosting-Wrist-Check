@@ -31,8 +31,7 @@ import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.ButtonDefaults
 import androidx.wear.compose.material3.CircularProgressIndicator
 import androidx.wear.compose.material3.FilledTonalButton
-import androidx.wear.compose.material3.FilledTonalIconButton
-import androidx.wear.compose.material3.IconButtonDefaults
+import androidx.wear.compose.material3.CompactButton
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
@@ -53,6 +52,8 @@ import java.util.concurrent.Executors
 class ProblemsActivity : ComponentActivity() {
     private var status by mutableStateOf<Status?>(null)
     private var loading by mutableStateOf(false)
+    /** When the watch last got an answer, "HH:mm", shown next to the refresh icon. */
+    private var refreshedAt by mutableStateOf("")
 
     /** Categories the user opened (true) or closed (false) by hand, so a refresh keeps their choice. */
     private val toggled = mutableStateMapOf<String, Boolean>()
@@ -64,6 +65,7 @@ class ProblemsActivity : ComponentActivity() {
                 ProblemsScreen(
                     status = status,
                     loading = loading,
+                    refreshedAt = refreshedAt,
                     isOpen = { g -> toggled[g.name] ?: g.problems.isNotEmpty() },
                     onToggle = { g, open -> toggled[g.name] = !open },
                     onRefresh = { load(force = true) },
@@ -105,7 +107,11 @@ class ProblemsActivity : ComponentActivity() {
             Refresh.complication(applicationContext)
             runOnUiThread {
                 loading = false
-                if (!isFinishing && !isDestroyed) status = s
+                if (!isFinishing && !isDestroyed) {
+                    status = s
+                    val pattern = if (android.text.format.DateFormat.is24HourFormat(this)) "HH:mm" else "h:mm"
+                    refreshedAt = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(java.util.Date())
+                }
             }
         }
     }
@@ -120,6 +126,7 @@ class ProblemsActivity : ComponentActivity() {
 private fun ProblemsScreen(
     status: Status?,
     loading: Boolean,
+    refreshedAt: String,
     isOpen: (Group) -> Boolean,
     onToggle: (Group, Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -140,24 +147,26 @@ private fun ProblemsScreen(
                 contentPadding = contentPadding,
                 modifier = Modifier.fillMaxSize(),
             ) {
-                // Small refresh button at the top, so the list gets the whole screen.
+                // Small refresh button at the top with the time of the last refresh next to the icon.
                 item {
                     Box(Modifier.fillMaxWidth().transformedHeight(this, spec), contentAlignment = Alignment.Center) {
-                        FilledTonalIconButton(
+                        CompactButton(
                             onClick = onRefresh,
                             enabled = !loading,
-                            modifier = Modifier.size(IconButtonDefaults.SmallButtonSize),
-                        ) {
-                            if (loading) {
-                                CircularProgressIndicator(Modifier.size(IconButtonDefaults.SmallIconSize))
-                            } else {
-                                Icon(
-                                    painterResource(R.drawable.ic_refresh),
-                                    contentDescription = "Refresh",
-                                    modifier = Modifier.size(IconButtonDefaults.SmallIconSize),
-                                )
-                            }
-                        }
+                            colors = ButtonDefaults.filledTonalButtonColors(),
+                            icon = {
+                                if (loading) {
+                                    CircularProgressIndicator(Modifier.size(ButtonDefaults.ExtraSmallIconSize))
+                                } else {
+                                    Icon(
+                                        painterResource(R.drawable.ic_refresh),
+                                        contentDescription = "Refresh",
+                                        modifier = Modifier.size(ButtonDefaults.ExtraSmallIconSize),
+                                    )
+                                }
+                            },
+                            label = { Text(if (loading) "Refreshing" else refreshedAt.ifEmpty { "Refresh" }) },
+                        )
                     }
                 }
                 item {

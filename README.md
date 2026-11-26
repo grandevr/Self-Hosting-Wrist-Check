@@ -27,7 +27,7 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 
 ## Problem list
 
-- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a small round **Refresh** button at the top. It is also in the watch's app list.
+- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a small **Refresh** button at the top showing the time of the last refresh. It is also in the watch's app list.
 - The screens use Material 3 for Wear OS and pick up the watch's dynamic colours (Wear OS 6 takes them from the watch face). Status colours stay fixed: green for up, amber for slow, red for down.
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
