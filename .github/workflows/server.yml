@@ -1,0 +1,27 @@
+name: Server scripts
+
+on:
+  push:
+    paths: ["server/**", ".github/workflows/server.yml", ".github/workflows/release.yml"]
+  pull_request:
+    paths: ["server/**", ".github/workflows/server.yml", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Syntax
+        run: |
+          bash -n server/install.sh
+          bash -n server/proxies.sh
+          python3 -m py_compile server/kuma-status.py
+      - name: ShellCheck
+        run: shellcheck -x -P SCRIPTDIR -S warning server/install.sh server/proxies.sh server/tests/run.sh server/tests/release.sh
+      - name: Config tests (sample Caddy and nginx configs)
+        run: bash server/tests/run.sh
+      - name: Status writer tests
+        run: python3 server/tests/test_writer.py
+      - name: Release build works
+        run: bash server/tests/release.sh v0.0.0-test dist && bash -n dist/install.sh

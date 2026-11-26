@@ -30,14 +30,14 @@ Output, e.g.:
    "updated":1795637760}
 DOWN problems come before SLOW ones. "groups" follows the groups on the Kuma status page.
 "details" has one entry per listed monitor, keyed by its name, for the watch's detail screen:
-  {"state":"down","since":1795637400,"msg":"timeout of 48000ms exceeded","ping":null,
-   "pings":[120,118,null,...],"up24":99.31,"cert":41}
+  {"state":"down","since":1795637400,"ping":null,"pings":[120,118,null,...],"up24":99.31,"cert":41}
   state  up | down | slow | pending       since  unix time the state began ("before": true when
-  msg    Kuma's last message (cut to 120)        it began before the oldest check Kuma sent)
-  ping   latest response time in ms         pings  recent response times, oldest first, null = down
-  up24   24-hour uptime in percent          cert   days until the TLS certificate expires (only with
+  ping   latest response time in ms              it began before the oldest check Kuma sent)
+  up24   24-hour uptime in percent          pings  recent response times, oldest first, null = down
+                                            cert   days until the TLS certificate expires (only with
                                                    "Show Certificate Expiry" on the status page)
-Fields Kuma doesn't provide are left out.
+Fields Kuma doesn't provide are left out. There's no error message per monitor: Kuma's public status
+page API leaves the heartbeat messages out (they can hold internal details), so the writer can't send them.
 If Kuma can't be read: "short" is "Kuma DOWN", "count" is 0 and an "error" field is present.
 
   kuma-status.py            write OUT
@@ -78,7 +78,6 @@ if PENDING_MODE not in ("ignore", "slow", "down"):
 PRIORITY_GROUPS = [g.strip().lower() for g in os.environ.get("PRIORITY_GROUPS", "").split(",") if g.strip()]
 DETAIL_POINTS = int_env("DETAIL_POINTS", 40)
 MAX_BYTES = max(4000, int_env("MAX_BYTES", 60000))
-MSG_MAX = 120
 
 
 class NoSuchPage(Exception):
@@ -177,9 +176,6 @@ def detail(mon, history, state, uptime, limit=0):
         d["since"] = since
         if i == 0:
             d["before"] = True  # the state started before the oldest check we have
-    msg = " ".join(str(last.get("msg") or "").split())
-    if msg:
-        d["msg"] = msg[:MSG_MAX]
     ping = last.get("ping")
     d["ping"] = int(round(ping)) if isinstance(ping, (int, float)) and status == UP else None
     pings = []
@@ -311,6 +307,13 @@ def check():
         return 4
     n = sum(len(g.get("monitorList") or []) for g in page.get("publicGroupList") or [])
     print("Found status page '%s' with %d monitors." % (KUMA_SLUG, n))
+    config = page.get("config") or {}
+    if config.get("showTags") is False:
+        print("Note: \"Show Tags\" is off on this status page, so the tags slow_ms:<ms> and priority:high")
+        print("      can't be read. Turning it on (Edit Status Page) also shows the tags to the page's visitors.")
+    if config.get("showCertificateExpiry") is False:
+        print("Note: \"Show Certificate Expiry\" is off, so the watch can't show certificate days. Turning it")
+        print("      on also shows them on the public status page.")
     return 0
 
 

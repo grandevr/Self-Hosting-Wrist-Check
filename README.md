@@ -37,7 +37,6 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 Tap a service in the list to open its detail screen (rows that can be opened end in `›`). It shows:
 
 - **status and since when**: `DOWN`, `SLOW`, `UP` or `PENDING`, e.g. "since 14:02 · 1 h 12 min" ("since before ..." when the change is older than the checks Kuma keeps on its status page);
-- **Kuma's message**: the last heartbeat message, e.g. `timeout of 48000ms exceeded` or `502 - Bad Gateway`;
 - **response time**: the latest ping, and a small graph of the last 40 checks (red ticks along the bottom are checks that got no answer);
 - **24h uptime** in percent;
 - **certificate expiry** in days, when **Show Certificate Expiry** is turned on for the Kuma status page.
@@ -48,13 +47,14 @@ The `details` object, keyed by service name (every field optional):
 
 ```json
 "details": {
-  "PKVault": {"state":"down","since":1795637400,"msg":"timeout of 48000ms exceeded","ping":null,
-              "pings":[120,118,null,null],"up24":95.83},
+  "PKVault": {"state":"down","since":1795637400,"ping":null,"pings":[120,118,null,null],"up24":95.83},
   "Jellyfin": {"state":"up","since":1795600000,"before":true,"ping":144,"pings":[150,144],"up24":100,"cert":41}
 }
 ```
 
 `state` is `up`, `down`, `slow` or `pending`; `since` is unix time; `pings` are milliseconds, oldest first, `null` for a check with no answer; `up24` is percent; `cert` is days left.
+
+There's no error text per service: Kuma's public status page API leaves the heartbeat messages out (they can hold internal details), so the writer has none to send.
 
 ## Optional: list working services
 
@@ -87,7 +87,11 @@ The watch reads one URL, such as `https://example.com/health/status.json`. It mu
 
 In a terminal it finds the proxies on the machine and asks which one the watch goes through; `PROXY=` answers it ahead of time (default `caddy`). Not every proxy can do every mode: HAProxy and "other" only check the token (`check-only`), and Traefik always passes the path to an address you give (`proxy`).
 
-Run it in a terminal and it guides you. It looks around the machine first (Kuma, its status pages, the reverse proxies and their sites, a web server folder that already serves `/health/`, older status timers), suggests an answer to each question, and shows a plan before it changes anything. Add `--dry-run` to see the plan without changing anything.
+Run it in a terminal and it guides you. It looks around the machine first (Kuma, its status pages, the reverse proxies and their sites, a web server folder that already serves `/health/`, older status timers), suggests an answer to each question, and shows a plan before it changes anything. Add `--dry-run` to see the plan without changing anything. Without a terminal it still prints what it found, so the log shows it, but it only uses the settings you give. Kuma 2 with MariaDB keeps its status pages where the installer can't list them; it says so, and you enter the slug.
+
+It also checks the Kuma status page: if **Show Tags** or **Show Certificate Expiry** is off there, it says what that turns off (the `slow_ms` and `priority:high` tags, the certificate days on the watch) and that turning them on also shows them on the public page.
+
+When the token check is in place, it tests the status URL right away, the same as `--verify` (see [Check it works](#check-it-works)).
 
 ### Everything on one machine
 
@@ -107,7 +111,7 @@ A common homelab layout: Kuma and a web server (nginx, or an inner Caddy) at hom
    curl -fsSL .../server/install.sh | sudo bash -s -- --writer-only
    ```
 
-   Point it at a folder your web server already serves, for example the folder behind `/health/`. The existing chain of proxies then carries the file to the public Caddy unchanged. If the writer's user can't write to that folder, the installer asks before changing anything: it can give that user access to that one folder (`acl`) or run the writer as the folder's owner (`owner`). At the end it prints the exact command for step 2.
+   Point it at a folder your web server already serves, for example the folder behind `/health/`. The existing chain of proxies then carries the file to the public Caddy unchanged. If the writer's user can't write to that folder, the installer asks before changing anything: it can give that user access to that one folder (`acl`, needs `setfacl`), give the folder to that user (`chown`; the old owner is saved and gets it back on `--uninstall`), or run the writer as the folder's owner (`owner`). At the end it prints what's left to do, and skips that if the token check already answers.
 
 2. **On the public proxy, add the token check.** The steps below use Caddy; nginx works the same way, and the other proxies get their lines printed with the steps to add them. Pick the mode that matches your setup:
 
@@ -129,13 +133,15 @@ A common homelab layout: Kuma and a web server (nginx, or an inner Caddy) at hom
    curl -fsSL .../server/install.sh | bash -s -- --print-snippet
    ```
 
-   `SNIPPET_OUT=/etc/caddy/wrist-check.caddy` writes the lines to a file you can `import` instead. The file is made readable for Caddy.
+   `SNIPPET_OUT=/etc/caddy/wrist-check.caddy` writes the lines to a file you can `import` instead. The file holds the token, so only Caddy gets to read it: an ACL for the `caddy` user if `setfacl` is there, otherwise the `caddy` group, and only as a last resort readable by everyone (it tells you when). The token is also kept in `~/.config/wrist-check/token` so `--show` and `--verify` work later; `SAVE_TOKEN=no` skips that copy.
 
 3. **Already checking a token there?** The installer finds an existing token check for the same folder, including one in a file the site imports, and lists exactly those lines. Error pages (`handle_errors`) and headers aren't affected and stay. It offers to keep your current token, so watches already set up keep working. With sudo it can comment the old lines out for you: nothing is deleted, the files are backed up, and the change is undone if Caddy complains. Otherwise you remove those lines by hand.
 
 4. **Anything in between**, such as an inner Caddy at home, stays as it is.
 
-5. **Set up the watch**: run `--show` on the machine with the token check.
+5. **Check it**: `--verify` from any machine (see [Check it works](#check-it-works)).
+
+6. **Set up the watch**: run `--show` on the machine with the token check.
 
 **Only the status file, or the whole folder?** By default the check covers just `status.json`. Other paths in the same folder are then answered by whatever serves them (for example an nginx 403 or 404). Answer `folder` (or `PROTECT=folder`) to cover everything under `/health/`. The installer suggests this when your old check covered the whole folder.
 
@@ -154,18 +160,59 @@ python3 is enough to fetch and run the installer:
 python3 -c "import urllib.request,sys;sys.stdout.buffer.write(urllib.request.urlopen('https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh').read())" | sudo bash -s -- --writer-only
 ```
 
-Or download `install.sh` and `kuma-status.py` on any machine, copy both to the server, and run `sudo bash install.sh --writer-only`. Run from a file, the installer deletes itself and `kuma-status.py` when done, unless it's in a git checkout or you set `KEEP_INSTALLER=yes`.
+Or download `install.sh` and `kuma-status.py` (and `proxies.sh`, for a proxy other than Caddy or nginx) on any machine, copy them to the server, and run `sudo bash install.sh --writer-only`. Run from a file, the installer deletes itself and those files when done, unless it's in a git checkout or you set `KEEP_INSTALLER=yes`.
+
+### Check it works
+
+```
+curl -fsSL .../server/install.sh | bash -s -- --verify
+```
+
+Run it on any machine, no root needed. It fetches the status URL twice: with the token it expects the status JSON, written in the last few minutes; without it, a 404. It says which part fails and what usually causes it (a different token, the check not reloaded, the writer's timer not running, home not reachable, the file readable without the token). It takes the URL and token from the settings when they're there (use sudo for the saved token), from `STATUS_URL` and `TOKEN_FILE`, or asks; a pasted token isn't shown or put on a command line. It exits non-zero on a problem, so it can go in a cron job or monitor.
+
+### Upgrading
+
+```
+curl -fsSL .../server/install.sh | sudo bash -s -- --upgrade
+```
+
+`--upgrade` installs the current writer and token check with the saved settings and asks nothing: it replaces the writer, its systemd units and the Caddy or nginx snippet (validated and rolled back like the first time), keeps the token, and tests the URL. Lines you pasted in yourself for other proxies stay. Running the installer again without `--upgrade` does the same, but goes through the questions with your saved answers as defaults. The first line of every run says which version it is (`main`, or a release tag); `--version` prints only that.
+
+### Pinned releases
+
+Each GitHub release has its own `install.sh`, with the release's tag built in. It downloads `kuma-status.py` and `proxies.sh` only from that release and refuses them unless they match the checksums built into it, so what runs is exactly what you can read in that release. `SHA256SUMS` in the release covers all three files:
+
+```
+curl -fsSLO https://github.com/grandevr/Self-Hosting-Wrist-Check/releases/download/<tag>/install.sh
+curl -fsSLO https://github.com/grandevr/Self-Hosting-Wrist-Check/releases/download/<tag>/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS && sudo bash install.sh
+```
+
+### What runs as root
+
+Everything the installer changes is listed in its plan before it starts, and `--dry-run` stops there. As root it:
+
+- creates the system user `wrist-check` (no login shell, no home);
+- installs `/usr/local/bin/wrist-check-status` and the `wrist-check-status` service and timer. The writer itself runs as `wrist-check`, not root, with systemd's `ProtectSystem=strict`, `NoNewPrivileges` and write access to the status file's folder only;
+- for the status folder: creates `/var/lib/wrist-check`, or, for a folder you picked, adds an ACL, changes its owner (saved, given back on `--uninstall`), or runs the writer as that folder's owner;
+- keeps settings in `/etc/wrist-check/env` and the token in `/etc/wrist-check/token` (root only);
+- Caddy: writes `wrist-check.caddy`, adds one `import` line to your site, comments out an old token check if you agree (backups next to the files), runs `caddy validate` and reloads, and puts everything back if either fails;
+- nginx: writes `/etc/nginx/snippets/wrist-check.conf`, adds one `include` line, runs `nginx -t` and reloads, with the same rollback.
+
+The other proxies' config is printed, never applied. That code lives in `server/proxies.sh`, which is downloaded only when you pick one of them. `--uninstall` lists what it will remove, then removes it.
 
 ### Later
 
 ```
+... | bash -s -- --verify             # test the status URL, from any machine
+... | sudo bash -s -- --upgrade       # latest writer and token check, saved settings, no questions
 ... | sudo bash -s -- --show          # print the URL and token (to set up another watch)
 ... | sudo bash -s -- --rotate        # new token; every watch must be set up again
 ... | sudo bash -s -- --uninstall     # remove everything it added here (lists it first)
 ... | sudo bash -s -- --uninstall --writer-only   # only the writer (a token check elsewhere stays)
 ```
 
-`--dry-run` works with all of these.
+`--dry-run` works with all of these except `--verify`, which changes nothing anyway.
 
 ### Settings
 
@@ -182,16 +229,19 @@ Every question can be answered ahead of time with an environment variable, e.g. 
 | `UPSTREAM` | check | where `proxy` fetches the file, e.g. `http://10.0.0.5:8080` |
 | `PROTECT` | check | `file` (default) or `folder`: what the check covers |
 | `TOKEN_FILE` / `TOKEN` | check | reuse an existing token (e.g. from your password manager). `TOKEN_FILE` keeps it out of your shell history |
-| `OLD_CHECK` | check | an existing token check for the folder: `disable` (comment it out) or `keep`. Without it, the installer stops and lists the lines |
+| `OLD_CHECK` | check | an existing token check for the folder: `disable` (comment it out) or `keep`. Without it, the installer stops and lists the lines. Only `keep` is saved for next time |
 | `CADDYFILE`, `CADDY_SNIPPET` | check | default `/etc/caddy/Caddyfile` and `wrist-check.caddy` next to it |
 | `EDIT_CADDYFILE=no` | check | don't touch the Caddyfile; print the import line to add instead |
 | `SKIP_VALIDATE=yes` | check | skip `caddy validate` and rely on the reload (a failed reload is still rolled back) |
 | `RELOAD_CMD` | check | how to reload Caddy or nginx, e.g. `"sudo systemctl reload caddy"` |
 | `SNIPPET_OUT` | check | with `--print-snippet`: write the lines to this file |
+| `SAVE_TOKEN=no` | check | with `--print-snippet`: don't keep a copy of the token in the settings folder (`~/.config/wrist-check` without sudo). `--show` then can't print it |
+| `SKIP_VERIFY=yes` | check | don't test the status URL at the end |
+| `STATUS_URL` | check | with `--verify`: the URL to test, when there are no settings on that machine |
 | `KUMA_URL` | writer | Uptime Kuma as seen from this machine, default `http://127.0.0.1:3001` |
 | `KUMA_SLUG` | writer | the status page's slug, the last part of `/status/<slug>` (required, checked against Kuma) |
 | `OUT` | writer | file to write, default `/var/lib/wrist-check/status.json` |
-| `OUT_ACCESS` | writer | when the writer's user can't write to `OUT`'s folder: `acl` (give it access to that folder) or `owner` (run as the folder's owner) |
+| `OUT_ACCESS` | writer | when the writer's user can't write to `OUT`'s folder: `acl` (give it access to that folder), `chown` (give it the folder; `--uninstall` gives it back) or `owner` (run as the folder's owner) |
 | `SLOW_MS` | writer | response time that counts as slow, default 2000 (0 = off) |
 | `SLOW_RUNS` | writer | how many checks in a row must be slow before it says SLOW, default 3 |
 | `PENDING` | writer | monitors Kuma is retrying: `ignore` (default), `slow` or `down` |
@@ -205,7 +255,7 @@ Every question can be answered ahead of time with an environment variable, e.g. 
 
 DOWN monitors come first, then SLOW ones. Within each, the groups in `PRIORITY_GROUPS` come first, then the status page order. Monitors in maintenance are left out. SLOW needs the last `SLOW_RUNS` checks to all be over the limit, so one slow check doesn't flip the watch. It reads them from Kuma's own heartbeat list, so no state file is needed. If Kuma can't be read, `short` is `Kuma DOWN`, `count` is 0 and an `error` field says why.
 
-**Per-monitor settings (optional).** Two Kuma tags tune single monitors: `slow_ms` with a value (that monitor's own SLOW limit, 0 = never SLOW) and `priority` with the value `high` (listed before everything else). The status page only passes tags along with **Show Tags** turned on, and that also shows the tags to anyone who can open the page. If you'd rather keep tags hidden, leave it off and use `PRIORITY_GROUPS` and `SLOW_MS` instead.
+**Per-monitor settings (optional).** Two Kuma tags tune single monitors: `slow_ms` with a value (that monitor's own SLOW limit, 0 = never SLOW) and `priority` with the value `high` (listed before everything else). The status page only passes tags along with **Show Tags** turned on, and that also shows the tags to anyone who can open the page. If you'd rather keep tags hidden, leave it off and use `PRIORITY_GROUPS` and `SLOW_MS` instead. The installer (and `wrist-check-status --check`) tells you when **Show Tags** or **Show Certificate Expiry** is off.
 
 The writer also adds `details` for the watch's detail screen (see [Service detail](#service-detail)). Two settings tune its size; the defaults suit most setups, and they can be set with `sudo systemctl edit wrist-check-status` (`[Service]` then `Environment=DETAIL_POINTS=20`):
 
@@ -346,7 +396,9 @@ app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 server/
   install.sh              server setup: status writer + timer and/or the token check for Caddy, nginx and others, guided or scripted
+  proxies.sh              the lines and steps for npm, Traefik, Apache, HAProxy and others (printed only, downloaded when needed)
   kuma-status.py          writes status.json from an Uptime Kuma status page
+  tests/                  sample Caddy and nginx configs and tests, run by .github/workflows/server.yml
 secrets.properties.example  optional build-time default URL + token
 keystore.properties.example optional release signing key
 app/proguard-rules.pro      R8 keep rules for the release build

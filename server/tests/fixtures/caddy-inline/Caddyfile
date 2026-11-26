@@ -1,0 +1,10 @@
+example.com {
+	handle /health/* {
+		@nt not header Authorization "Bearer test-token-0123456789abcdef"
+		respond @nt 404
+		reverse_proxy 10.0.0.7:8080
+	}
+	handle {
+		reverse_proxy 10.0.0.5:8080
+	}
+}

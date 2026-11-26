@@ -1,0 +1,9 @@
+example.com {
+	@health path /health/*
+	header @health Cache-Control "no-store"
+	handle_errors {
+		@healtherr path /health/*
+		respond @healtherr "{\"short\":\"HOME DOWN\"}" 200
+	}
+	reverse_proxy 10.0.0.5:8080
+}

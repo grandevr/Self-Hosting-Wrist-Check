@@ -1,0 +1,13 @@
+{
+	email admin@example.com
+}
+
+other.example.com {
+	respond "not this site"
+}
+
+example.com {
+	import health-token.caddy
+	header /health/* Cache-Control "no-store"
+	reverse_proxy 10.0.0.5:8080
+}
