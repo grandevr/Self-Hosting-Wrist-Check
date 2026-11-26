@@ -5,7 +5,6 @@ import android.content.Context
 /** Which items the detail screen shows. All on by default; changed in Settings. */
 enum class DetailItem(val key: String, val label: String) {
     STATE("show_state", "Status and since"),
-    MESSAGE("show_message", "Kuma's message"),
     PING("show_ping", "Response time"),
     GRAPH("show_graph", "Response graph"),
     UPTIME("show_uptime", "24h uptime"),

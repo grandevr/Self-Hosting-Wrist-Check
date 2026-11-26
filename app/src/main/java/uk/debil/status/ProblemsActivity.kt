@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,9 +31,8 @@ import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.ButtonDefaults
 import androidx.wear.compose.material3.CircularProgressIndicator
-import androidx.wear.compose.material3.EdgeButton
-import androidx.wear.compose.material3.EdgeButtonSize
 import androidx.wear.compose.material3.FilledTonalButton
+import androidx.wear.compose.material3.CompactButton
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
@@ -47,12 +47,14 @@ import java.util.concurrent.Executors
 /**
  * Scrollable list of everything that's down or slow, then (if the server sends them) what's up.
  * If status.json has "groups", shows collapsible categories instead ("Media / UP 3 • DOWN 1").
- * Opened by tapping the complication (or from the app list). Opening it, or tapping "Refresh",
+ * Opened by tapping the complication (or from the app list). Opening it, or tapping the small refresh button at the top,
  * also refreshes the complication right away. Scrolls with touch or the rotating bezel.
  */
 class ProblemsActivity : ComponentActivity() {
     private var status by mutableStateOf<Status?>(null)
     private var loading by mutableStateOf(false)
+    /** When the watch last got an answer, "HH:mm", shown next to the refresh icon. */
+    private var refreshedAt by mutableStateOf("")
 
     /** Categories the user opened (true) or closed (false) by hand, so a refresh keeps their choice. */
     private val toggled = mutableStateMapOf<String, Boolean>()
@@ -64,6 +66,7 @@ class ProblemsActivity : ComponentActivity() {
                 ProblemsScreen(
                     status = status,
                     loading = loading,
+                    refreshedAt = refreshedAt,
                     isOpen = { g -> toggled[g.name] ?: g.problems.isNotEmpty() },
                     onToggle = { g, open -> toggled[g.name] = !open },
                     onRefresh = { load(force = true) },
@@ -105,7 +108,11 @@ class ProblemsActivity : ComponentActivity() {
             Refresh.complication(applicationContext)
             runOnUiThread {
                 loading = false
-                if (!isFinishing && !isDestroyed) status = s
+                if (!isFinishing && !isDestroyed) {
+                    status = s
+                    val pattern = if (android.text.format.DateFormat.is24HourFormat(this)) "HH:mm" else "h:mm"
+                    refreshedAt = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(java.util.Date())
+                }
             }
         }
     }
@@ -120,6 +127,7 @@ class ProblemsActivity : ComponentActivity() {
 private fun ProblemsScreen(
     status: Status?,
     loading: Boolean,
+    refreshedAt: String,
     isOpen: (Group) -> Boolean,
     onToggle: (Group, Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -134,29 +142,35 @@ private fun ProblemsScreen(
     val listState = rememberTransformingLazyColumnState()
     val spec = rememberTransformationSpec()
     AppScaffold {
-        ScreenScaffold(
-            scrollState = listState,
-            edgeButton = {
-                EdgeButton(onClick = onRefresh, buttonSize = EdgeButtonSize.Medium, enabled = !loading) {
-                    if (loading) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    } else {
-                        Icon(painterResource(R.drawable.ic_refresh), contentDescription = "Refresh")
-                    }
-                }
-            },
-        ) { contentPadding ->
+        ScreenScaffold(scrollState = listState) { contentPadding ->
             TransformingLazyColumn(
                 state = listState,
                 contentPadding = contentPadding,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
+                // Small refresh button at the top with the time of the last refresh next to the icon.
                 item {
-                    ListHeader(Modifier.transformedHeight(this, spec), transformation = SurfaceTransformation(spec)) {
-                        Text("Homelab")
+                    Box(Modifier.fillMaxWidth().transformedHeight(this, spec), contentAlignment = Alignment.Center) {
+                        CompactButton(
+                            onClick = onRefresh,
+                            enabled = !loading,
+                            colors = ButtonDefaults.filledTonalButtonColors(),
+                            icon = {
+                                if (loading) {
+                                    CircularProgressIndicator(Modifier.size(ButtonDefaults.ExtraSmallIconSize))
+                                } else {
+                                    Icon(
+                                        painterResource(R.drawable.ic_refresh),
+                                        contentDescription = "Refresh",
+                                        modifier = Modifier.size(ButtonDefaults.ExtraSmallIconSize),
+                                    )
+                                }
+                            },
+                            label = { Text(if (loading) "Refreshing" else refreshedAt.ifEmpty { "Refresh" }) },
+                        )
                     }
                 }
-
                 if (status == null) {
                     item {
                         Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -216,7 +230,7 @@ private fun ProblemsScreen(
 /** Big status word ("ALL UP", "2 DOWN"), coloured by severity. */
 @Composable
 private fun Headline(status: Status, modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = status.shortText(),
             style = MaterialTheme.typography.displaySmall,

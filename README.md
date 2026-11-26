@@ -27,7 +27,7 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 
 ## Problem list
 
-- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a round **Refresh** button at the bottom edge. It is also in the watch's app list.
+- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a small **Refresh** button at the top showing the time of the last refresh. It is also in the watch's app list.
 - The screens use Material 3 for Wear OS and pick up the watch's dynamic colours (Wear OS 6 takes them from the watch face). Status colours stay fixed: green for up, amber for slow, red for down.
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
@@ -328,6 +328,8 @@ Android only installs an update over an existing app if both are signed with the
 2. Copy `keystore.properties.example` to `keystore.properties` and fill in the path and password.
 
 `keystore.properties`, `*.jks` and `*.keystore` are gitignored. Without `keystore.properties`, release builds are signed with the machine's debug key (`~/.android/debug.keystore`), which is stable on one computer but differs between computers. If `keystore.properties` exists but a value is missing, the build stops with a clear error.
+
+**Builds on GitHub.** Every push runs the Build workflow, which uploads the release APK as the `wrist-check-release` artifact (open the run under **Actions** and download it at the bottom). To sign it with your key, add four repository secrets under Settings → Secrets and variables → Actions: `KEYSTORE_BASE64` (the keystore file as one line of base64: `base64 -w0 wrist-check.jks`), `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`. Without them the artifact is signed with the runner's throwaway debug key and won't install over your own builds. The workflow never has `secrets.properties`, so the APK holds no token.
 
 If the watch still has an APK signed with a different key, uninstall it once (`adb uninstall uk.debil.status`) before installing; after that, updates install with `-r`.
 
