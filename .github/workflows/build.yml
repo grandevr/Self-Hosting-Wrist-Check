@@ -20,6 +20,36 @@ jobs:
       # so never build with the real token here or upload an APK that contains it.
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --stacktrace
-      # Shrunk build (R8). No keystore.properties here, so it's signed with the runner's debug key.
+      # Release signing key from repository secrets, so the APK installs over earlier builds with
+      # `adb install -r`. Without the secrets (forks, or before they're added) the release APK is
+      # signed with the runner's debug key instead and won't install over a build signed with the key.
+      - name: Set up release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::No KEYSTORE_BASE64 secret: the release APK is signed with the debug key."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+          {
+            echo "storeFile=release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+      # Shrunk build (R8).
       - name: Assemble release APK
         run: ./gradlew assembleRelease --stacktrace
+      - name: Remove signing key
+        if: always()
+        run: rm -f release.jks keystore.properties
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrist-check-release
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
