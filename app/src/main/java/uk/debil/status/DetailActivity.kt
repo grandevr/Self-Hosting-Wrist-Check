@@ -95,7 +95,8 @@ private fun DetailScreen(name: String, d: Detail?, checked: String, shown: Set<D
                     }
                 }
 
-                if (DetailItem.MESSAGE in shown && d.msg.isNotEmpty()) {
+                // Kuma's public status page API usually leaves the message out, so no switch: shown only when present.
+                if (d.msg.isNotEmpty()) {
                     item {
                         Caption(d.msg, Modifier.padding(top = 6.dp).transformedHeight(this, spec), MaterialTheme.colorScheme.onSurface)
                     }

@@ -30,9 +30,9 @@ import androidx.wear.compose.foundation.lazy.rememberTransformingLazyColumnState
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.ButtonDefaults
 import androidx.wear.compose.material3.CircularProgressIndicator
-import androidx.wear.compose.material3.EdgeButton
-import androidx.wear.compose.material3.EdgeButtonSize
 import androidx.wear.compose.material3.FilledTonalButton
+import androidx.wear.compose.material3.FilledTonalIconButton
+import androidx.wear.compose.material3.IconButtonDefaults
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
@@ -47,7 +47,7 @@ import java.util.concurrent.Executors
 /**
  * Scrollable list of everything that's down or slow, then (if the server sends them) what's up.
  * If status.json has "groups", shows collapsible categories instead ("Media / UP 3 • DOWN 1").
- * Opened by tapping the complication (or from the app list). Opening it, or tapping "Refresh",
+ * Opened by tapping the complication (or from the app list). Opening it, or tapping the small refresh button at the top,
  * also refreshes the complication right away. Scrolls with touch or the rotating bezel.
  */
 class ProblemsActivity : ComponentActivity() {
@@ -134,23 +134,32 @@ private fun ProblemsScreen(
     val listState = rememberTransformingLazyColumnState()
     val spec = rememberTransformationSpec()
     AppScaffold {
-        ScreenScaffold(
-            scrollState = listState,
-            edgeButton = {
-                EdgeButton(onClick = onRefresh, buttonSize = EdgeButtonSize.Medium, enabled = !loading) {
-                    if (loading) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    } else {
-                        Icon(painterResource(R.drawable.ic_refresh), contentDescription = "Refresh")
-                    }
-                }
-            },
-        ) { contentPadding ->
+        ScreenScaffold(scrollState = listState) { contentPadding ->
             TransformingLazyColumn(
                 state = listState,
                 contentPadding = contentPadding,
                 modifier = Modifier.fillMaxSize(),
             ) {
+                // Small refresh button at the top, so the list gets the whole screen.
+                item {
+                    Box(Modifier.fillMaxWidth().transformedHeight(this, spec), contentAlignment = Alignment.Center) {
+                        FilledTonalIconButton(
+                            onClick = onRefresh,
+                            enabled = !loading,
+                            modifier = Modifier.size(IconButtonDefaults.SmallButtonSize),
+                        ) {
+                            if (loading) {
+                                CircularProgressIndicator(Modifier.size(IconButtonDefaults.SmallIconSize))
+                            } else {
+                                Icon(
+                                    painterResource(R.drawable.ic_refresh),
+                                    contentDescription = "Refresh",
+                                    modifier = Modifier.size(IconButtonDefaults.SmallIconSize),
+                                )
+                            }
+                        }
+                    }
+                }
                 item {
                     ListHeader(Modifier.transformedHeight(this, spec), transformation = SurfaceTransformation(spec)) {
                         Text("Homelab")

@@ -27,7 +27,7 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 
 ## Problem list
 
-- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a round **Refresh** button at the bottom edge. It is also in the watch's app list.
+- Tapping the complication opens the **debil status** screen: the status (`ALL UP`, `2 DOWN`, ...), every problem in a scrollable list (touch or rotating bezel), the check time and a small round **Refresh** button at the top. It is also in the watch's app list.
 - The screens use Material 3 for Wear OS and pick up the watch's dynamic colours (Wear OS 6 takes them from the watch face). Status colours stay fixed: green for up, amber for slow, red for down.
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
@@ -37,7 +37,7 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 Tap a service in the list to open its detail screen (rows that can be opened end in `›`). It shows:
 
 - **status and since when**: `DOWN`, `SLOW`, `UP` or `PENDING`, e.g. "since 14:02 · 1 h 12 min" ("since before ..." when the change is older than the checks Kuma keeps on its status page);
-- **Kuma's message**: the last heartbeat message, e.g. `timeout of 48000ms exceeded` or `502 - Bad Gateway`;
+- **Kuma's message**, only when the server sends one (Kuma's public status page API leaves it out, so with the standard writer this row doesn't appear and has no switch);
 - **response time**: the latest ping, and a small graph of the last 40 checks (red ticks along the bottom are checks that got no answer);
 - **24h uptime** in percent;
 - **certificate expiry** in days, when **Show Certificate Expiry** is turned on for the Kuma status page.
