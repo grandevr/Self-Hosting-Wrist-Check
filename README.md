@@ -44,30 +44,131 @@ Use plain service names (no ` UP` suffix), in the order you want them shown. Lea
 
 ## Server setup
 
-The watch needs one URL that returns `status.json` only when the request carries the right bearer token (404 otherwise). One line sets that up on a Linux server running Caddy (and, optionally, Uptime Kuma):
+The watch needs one URL that returns `status.json` only when the request carries the right bearer token (404 otherwise). `server/install.sh` sets that up. It has two parts, which can run on the same machine or on different ones:
+
+- **writer**: `kuma-status.py`, run every minute by a systemd timer. It reads an Uptime Kuma status page and writes `status.json`. It goes where Python can reach Kuma.
+- **route**: a Caddy snippet that checks the token. It goes on the Caddy the watch connects to.
+
+### One server (Kuma, Caddy and Python together)
 
 ```
 curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash
 ```
 
-Nothing to download or place by hand, and nothing left behind except what it installs: piped like this the installer never touches the disk, and it fetches the status writer into a temporary folder that's deleted at the end. (Run as a downloaded file, `sudo ./install.sh` deletes itself when done, unless it's inside a git checkout.)
+Run in a terminal, the installer first looks around: it finds Uptime Kuma (local ports and Docker containers) and its status pages, Caddy and its sites, a web server folder that already serves `/health/`, and older timers that look like a status writer. It suggests what to install and the settings to use, you confirm or change each answer, and it shows the plan before changing anything.
 
-It asks for your domain, the path (default `/health/status.json`) and whether to install the status writer, then:
+What it does:
 
-- makes a random 64-character token and writes `/etc/caddy/wrist-check.caddy`, a snippet that serves the file only with that token;
-- adds `import wrist-check.caddy` to your domain's block in `/etc/caddy/Caddyfile` (asks first, keeps `Caddyfile.wrist-check.bak`, and puts the old file back if Caddy doesn't accept the result), then reloads Caddy;
-- optionally installs `kuma-status.py` as `/usr/local/bin/wrist-check-status` with a systemd timer that rewrites `/var/lib/wrist-check/status.json` every minute. It reads an Uptime Kuma **status page** over HTTP (public API, no Kuma login needed), so Kuma can run in Docker: point it at the published port, e.g. `http://127.0.0.1:3001`. Create a status page in Kuma with the monitors you want on your wrist and give the script its slug. DOWN monitors come first, then SLOW ones (Kuma "pending", or slower than `SLOW_MS`, default 2000 ms); monitors in maintenance are left out. Skip it if you already write the file yourself;
-- prints the URL and token to enter on the watch.
+- installs `kuma-status.py` as `/usr/local/bin/wrist-check-status` with a timer that rewrites `/var/lib/wrist-check/status.json` every minute. It reads Kuma's public status page API, so no Kuma login is needed and Kuma can run in Docker. It checks the status page slug first and stops if Kuma doesn't know it;
+- makes a random 64-character token (or reuses one, see below) and keeps it in `/etc/wrist-check/token`, readable by root only;
+- writes `/etc/caddy/wrist-check.caddy` and adds `import wrist-check.caddy` to your site's block in the Caddyfile. It asks first, keeps `Caddyfile.wrist-check.bak`, checks the result with `caddy validate`, reloads, and puts the old files back if either step fails.
 
-Later, the same line with an option:
+The token is not printed unless you ask for it with `--show`.
+
+### Writer and token check on different machines
+
+A common homelab layout has two hops: Kuma and a web server on one machine at home, and a public Caddy (often on a VPS) that terminates TLS and proxies to it. Then:
+
+1. **On the Kuma machine**, install only the writer, and point `OUT` at a folder your web server already serves, so the existing proxy chain carries the file:
+
+   ```
+   curl -fsSL .../server/install.sh | sudo bash -s -- --writer-only
+   ```
+
+   It needs python3 and systemd, not Caddy. If the folder belongs to another user, it offers to run the writer as that user (`WRITER_USER`).
+
+2. **On the public Caddy**, add only the token check. There are three route modes:
+
+   | `ROUTE=` | What Caddy does with the status path |
+   |---|---|
+   | `file` | serves the file from this machine (the writer runs here, or you copy the file here) |
+   | `check-only` | answers 404 without the token, and otherwise lets the site's existing `reverse_proxy` handle the request |
+   | `proxy` | answers 404 without the token, and otherwise sends the request to `UPSTREAM` |
+
+   `check-only` needs the site's `reverse_proxy` at the top level of the site block. If the block uses `handle` or `route` blocks, those run before the check, so the installer refuses `check-only` and suggests `proxy`.
+
+   With root:
+
+   ```
+   curl -fsSL .../server/install.sh | sudo bash -s -- --route-only
+   ```
+
+   Without root (you can edit the Caddyfile and reload, but can't run the installer as root), print the lines and paste them into the site block yourself:
+
+   ```
+   curl -fsSL .../server/install.sh | ROUTE=check-only bash -s -- --print-snippet
+   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
+   ```
+
+   Only the snippet goes to stdout, so `> file` works; `SNIPPET_OUT=file` writes it with mode 600. The token is kept in `~/.config/wrist-check/token`.
+
+3. Any Caddy in between (for example an inner Caddy at home that only proxies over `http://`) stays as it is.
+
+**An existing route for the same path.** If the site block already handles the status path (say, your own `@health_denied` matcher with a token), the installer lists those lines and stops instead of adding a second check: two checks with different tokens would answer 404 to every request. In a terminal it offers to print the replacement lines instead, and to keep the token your current route uses, so watches already set up keep working.
+
+**Optional extras the installer leaves alone.** Your `handle_errors` blocks stay as they are. Two that pair well with a two-hop setup:
+
+- on the public Caddy, when home can't be reached (502/503/504 for the status path), answer 200 with a small `status.json` whose `short` is `HOME DOWN`, so the watch names the problem instead of showing `OFFLINE`;
+- on an inner Caddy, the same for the machine behind it, e.g. `<machine> DOWN`.
+
+Set `updated` to the current time (Caddy's `{time.now.unix}` placeholder), or the watch shows `STALE`, and put the label in `problems` with `count` 1.
+
+### Without curl
+
+python3 is enough to fetch and run the installer:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --show       # URL and token again
-curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --rotate     # new token, set watches up again
-curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --uninstall  # remove everything it added
+python3 -c "import urllib.request,sys;sys.stdout.buffer.write(urllib.request.urlopen('https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh').read())" | sudo bash -s -- --writer-only
 ```
 
-Answers can also come from environment variables for a no-questions run, e.g. `curl ... | sudo DOMAIN=example.com KUMA_SLUG=homelab bash`. Settings live in `/etc/wrist-check/env`.
+Or download `install.sh` and `kuma-status.py` on any machine, copy both to the server, and run `sudo bash install.sh --writer-only`. Run from a file, the installer deletes itself and `kuma-status.py` when done (unless it's in a git checkout, or with `KEEP_INSTALLER=yes`).
+
+### Later
+
+```
+... | sudo bash -s -- --show          # print the URL and token (to set up another watch)
+... | sudo bash -s -- --rotate        # new token; every watch must be set up again
+... | sudo bash -s -- --uninstall     # remove everything it added here
+... | sudo bash -s -- --uninstall --writer-only   # only the writer (a route elsewhere stays)
+```
+
+### Settings
+
+Every question can be answered ahead of time with an environment variable, e.g. `curl ... | sudo DOMAIN=example.com KUMA_SLUG=homelab bash -s -- --writer-only`. Without a terminal (or with `NONINTERACTIVE=yes`) nothing is guessed: required answers that are missing stop the installer with a message. Settings are saved in `/etc/wrist-check/env` and reused next time; a variable on the command line wins over the saved value.
+
+| Variable | Part | Meaning |
+|---|---|---|
+| `ROLE` | both | `all`, `writer` or `route` (same as `--writer-only` / `--route-only`) |
+| `DOMAIN` | route | public domain of the Caddy site (required) |
+| `STATUS_PATH` | route | path of the status file, default `/health/status.json` |
+| `ROUTE` | route | `file`, `check-only` or `proxy` (required for route-only) |
+| `UPSTREAM` | route | where `proxy` sends requests, e.g. `http://10.0.0.5:8080` |
+| `TOKEN_FILE` / `TOKEN` | route | reuse an existing token (e.g. the one in your password manager) instead of making one. `TOKEN_FILE` keeps it out of your shell history |
+| `CADDYFILE`, `CADDY_SNIPPET` | route | default `/etc/caddy/Caddyfile` and `wrist-check.caddy` next to it |
+| `EDIT_CADDYFILE=no` | route | don't touch the Caddyfile; print the import line to add instead |
+| `SKIP_VALIDATE=yes` | route | skip `caddy validate` and rely on the reload (a failed reload is still rolled back) |
+| `RELOAD_CMD` | route | how to reload Caddy, e.g. `"sudo systemctl reload caddy"` |
+| `ALLOW_EXISTING_ROUTE=yes` | route | add the route even though the site block already handles the path |
+| `KUMA_URL` | writer | Uptime Kuma as seen from this machine, default `http://127.0.0.1:3001` |
+| `KUMA_SLUG` | writer | slug of the status page (required); checked against Kuma before installing |
+| `OUT` | writer | file to write, default `/var/lib/wrist-check/status.json` |
+| `SLOW_MS` | writer | response time that counts as slow, default 2000 (0 = off) |
+| `SLOW_RUNS` | writer | how many checks in a row must be slow before it says SLOW, default 3 |
+| `PENDING` | writer | monitors Kuma is retrying: `ignore` (default), `slow` or `down` |
+| `PRIORITY_GROUPS` | writer | status page groups whose problems come first, e.g. `"Public,Jobs,Host"` |
+| `WRITER_USER` | writer | user the timer runs as, default `wrist-check` |
+| `SKIP_KUMA_CHECK=yes` | writer | install even if Kuma can't be reached yet |
+
+The validation runs with the environment of the running `caddy` service, so a Caddyfile that uses `{$CF_API_TOKEN}` or similar from the unit's `Environment=` or an `override.conf` validates like it does for Caddy itself.
+
+### What the writer reports
+
+DOWN monitors come first, then SLOW ones. Within each, monitors tagged `priority:high` come first, then the groups in `PRIORITY_GROUPS`, then the status page order. Monitors in maintenance are left out. With **Show Tags** turned on for the status page, two Kuma tags tune single monitors:
+
+- `slow_ms` with a value, e.g. `slow_ms: 5000`: that monitor's own SLOW limit (0 = never SLOW);
+- `priority` with the value `high`: its problems are listed first.
+
+SLOW needs the last `SLOW_RUNS` heartbeats to all be over the limit, read from Kuma's own heartbeat list, so one slow check doesn't flip the watch and no state file is needed. If Kuma can't be read, `short` is `Kuma DOWN`, `count` is 0 and an `error` field says why.
 
 Not using Caddy? Any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
 
@@ -159,7 +260,7 @@ app/src/main/java/uk/debil/status/
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 server/
-  install.sh              one-line server setup: token, Caddy snippet + import, status writer + timer
+  install.sh              server setup: status writer + timer and/or the Caddy token check, guided or scripted
   kuma-status.py          writes status.json from an Uptime Kuma status page
 secrets.properties.example  optional build-time default URL + token
 ```
