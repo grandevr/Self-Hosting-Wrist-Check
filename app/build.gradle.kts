@@ -2,6 +2,7 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
 }
 
 // Optional build-time defaults for the URL and bearer token, from secrets.properties in the
@@ -32,14 +33,15 @@ android {
         applicationId = "uk.debil.status"
         minSdk = 30
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         buildConfigField("String", "STATUS_URL", "\"${secret("STATUS_URL")}\"")
         buildConfigField("String", "STATUS_TOKEN", "\"${secret("STATUS_TOKEN")}\"")
     }
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 
     compileOptions {
@@ -58,4 +60,7 @@ android {
 dependencies {
     implementation(libs.wear.complications.data.source)
     implementation(libs.zxing.core)
+    implementation(libs.activity.compose)
+    implementation(libs.wear.compose.material3)
+    implementation(libs.wear.compose.foundation)
 }

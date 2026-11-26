@@ -35,16 +35,6 @@ final class Status {
 
     static Status preview() { return ok("21:47"); }
 
-    /** Accent colour (ARGB) for the list screen. */
-    int color() {
-        switch (kind) {
-            case OK: return 0xFF66DD88;
-            case PROBLEMS: return downCount() > 0 ? 0xFFFF6E6E : 0xFFFFC566;
-            case OFFLINE: return 0xFFB0B0B0;
-            default: return 0xFFFFC566;
-        }
-    }
-
     /** Lines for the full list: every problem label, or a single explanation line. */
     List<String> detailLines() {
         List<String> lines = new ArrayList<>();
