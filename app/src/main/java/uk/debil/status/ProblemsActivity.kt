@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -145,6 +146,7 @@ private fun ProblemsScreen(
             TransformingLazyColumn(
                 state = listState,
                 contentPadding = contentPadding,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 // Small refresh button at the top with the time of the last refresh next to the icon.
@@ -169,12 +171,6 @@ private fun ProblemsScreen(
                         )
                     }
                 }
-                item {
-                    ListHeader(Modifier.transformedHeight(this, spec), transformation = SurfaceTransformation(spec)) {
-                        Text("Homelab")
-                    }
-                }
-
                 if (status == null) {
                     item {
                         Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -234,7 +230,7 @@ private fun ProblemsScreen(
 /** Big status word ("ALL UP", "2 DOWN"), coloured by severity. */
 @Composable
 private fun Headline(status: Status, modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = status.shortText(),
             style = MaterialTheme.typography.displaySmall,
