@@ -20,3 +20,6 @@ jobs:
       # so never build with the real token here or upload an APK that contains it.
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --stacktrace
+      # Shrunk build (R8). No keystore.properties here, so it's signed with the runner's debug key.
+      - name: Assemble release APK
+        run: ./gradlew assembleRelease --stacktrace

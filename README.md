@@ -116,10 +116,27 @@ The status writer from `server/install.sh` fills in `groups` from the groups on 
 Requirements: JDK 17+, Android SDK with platform 36 (Android Studio's SDK is fine; point to it with `ANDROID_HOME` or a `local.properties` containing `sdk.dir=...`). Gradle 9.2.1 and Android Gradle Plugin 9.0.0 come via the wrapper.
 
 ```
-./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-The APK lands in `app/build/outputs/apk/debug/app-debug.apk`. It contains no URL or token, so it's safe to share; every watch is set up as described above.
+The APK lands in `app/build/outputs/apk/release/app-release.apk` (about 2.6 MB). It contains no URL or token, so it's safe to share; every watch is set up as described above.
+
+The release build runs R8, which strips the parts of Compose and the other libraries the app doesn't use and drops unused resources. `./gradlew assembleDebug` still works (`app/build/outputs/apk/debug/app-debug.apk`), but keeps everything unshrunk and comes out at about 29 MB. Keep rules, if ever needed, go in `app/proguard-rules.pro`; a crash trace from a release build can be decoded with `app/build/outputs/mapping/release/mapping.txt`.
+
+### Signing key
+
+Android only installs an update over an existing app if both are signed with the same key. Otherwise `adb install -r` fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` and you have to uninstall first (which also clears the URL and token on the watch). So sign every build with one key you keep:
+
+1. Make a keystore once (any password; keep the file and password safe, they're not committed):
+   ```
+   keytool -genkeypair -keystore wrist-check.jks -storetype PKCS12 -alias wrist-check \
+     -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Self-Hosting Wrist Check"
+   ```
+2. Copy `keystore.properties.example` to `keystore.properties` and fill in the path and password.
+
+`keystore.properties`, `*.jks` and `*.keystore` are gitignored. Without `keystore.properties`, release builds are signed with the machine's debug key (`~/.android/debug.keystore`), which is stable on one computer but differs between computers. If `keystore.properties` exists but a value is missing, the build stops with a clear error.
+
+If the watch still has an APK signed with a different key, uninstall it once (`adb uninstall uk.debil.status`) before installing; after that, updates install with `-r`.
 
 Optional build-time default: copy `secrets.properties.example` to `secrets.properties` and fill in `STATUS_URL` and `STATUS_TOKEN`. The app then works without any watch setup, until something is entered on the watch (which wins). If the file exists, both values must be filled in or the build stops with a clear error. An APK built this way contains the token: don't share or commit it (both are gitignored). The GitHub Actions workflow builds without the file.
 
@@ -130,7 +147,7 @@ Optional build-time default: copy `secrets.properties.example` to `secrets.prope
    ```
    adb pair <watch-ip>:<pairing-port>
    adb connect <watch-ip>:<port>
-   adb -s <watch-ip>:<port> install -r app/build/outputs/apk/debug/app-debug.apk
+   adb -s <watch-ip>:<port> install -r app/build/outputs/apk/release/app-release.apk
    ```
 
 ## Pick the complication
@@ -162,4 +179,6 @@ server/
   install.sh              one-line server setup: token, Caddy snippet + import, status writer + timer
   kuma-status.py          writes status.json from an Uptime Kuma status page
 secrets.properties.example  optional build-time default URL + token
+keystore.properties.example optional release signing key
+app/proguard-rules.pro      R8 keep rules for the release build
 ```
