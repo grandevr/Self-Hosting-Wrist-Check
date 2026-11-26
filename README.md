@@ -305,7 +305,7 @@ Logs: `adb logcat -s DebilStatus`
 
 The app has no background service, wake lock, alarm or scheduled job. Wear OS asks the
 complication for data every 15 minutes, and each ask is one small HTTPS request (8-second
-timeouts, at most 32 KB). Requests that arrive close together (both complication types, a watch
+timeouts, at most 96 KB). Requests that arrive close together (both complication types, a watch
 face rebinding, the list screen opening) share one result for up to a minute. The setup screen
 turns Wi-Fi on and keeps the screen awake only while it is open, for at most 10 minutes.
 
