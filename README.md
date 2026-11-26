@@ -43,21 +43,30 @@ Use plain service names (no ` UP` suffix), in the order you want them shown. Lea
 
 ## Server setup
 
-The watch needs one URL that returns `status.json` only when the request carries the right bearer token (404 otherwise). `server/` sets that up on a Linux server running Caddy and Uptime Kuma:
+The watch needs one URL that returns `status.json` only when the request carries the right bearer token (404 otherwise). One line sets that up on a Linux server running Caddy (and, optionally, Uptime Kuma):
 
 ```
-git clone https://github.com/grandevr/Self-Hosting-Wrist-Check
-cd Self-Hosting-Wrist-Check/server
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash
 ```
+
+Nothing to download or place by hand, and nothing left behind except what it installs: piped like this the installer never touches the disk, and it fetches the status writer into a temporary folder that's deleted at the end. (Run as a downloaded file, `sudo ./install.sh` deletes itself when done, unless it's inside a git checkout.)
 
 It asks for your domain, the path (default `/health/status.json`) and whether to install the status writer, then:
 
-- makes a random 64-character token and writes `/etc/caddy/wrist-check.caddy`, a snippet that serves the file only with that token. Add `import wrist-check.caddy` inside your site block in the Caddyfile (the script tells you if it's missing) and it reloads Caddy;
-- optionally installs `kuma-status.py` as `/usr/local/bin/wrist-check-status` with a systemd timer that rewrites `/var/lib/wrist-check/status.json` every minute. It reads an Uptime Kuma **status page** (public API, no Kuma login needed): create a status page in Kuma with the monitors you want on your wrist and give the script its slug. DOWN monitors come first, then SLOW ones (Kuma "pending", or slower than `SLOW_MS`, default 2000 ms); monitors in maintenance are left out. Skip it if you already write the file yourself;
+- makes a random 64-character token and writes `/etc/caddy/wrist-check.caddy`, a snippet that serves the file only with that token;
+- adds `import wrist-check.caddy` to your domain's block in `/etc/caddy/Caddyfile` (asks first, keeps `Caddyfile.wrist-check.bak`, and puts the old file back if Caddy doesn't accept the result), then reloads Caddy;
+- optionally installs `kuma-status.py` as `/usr/local/bin/wrist-check-status` with a systemd timer that rewrites `/var/lib/wrist-check/status.json` every minute. It reads an Uptime Kuma **status page** over HTTP (public API, no Kuma login needed), so Kuma can run in Docker: point it at the published port, e.g. `http://127.0.0.1:3001`. Create a status page in Kuma with the monitors you want on your wrist and give the script its slug. DOWN monitors come first, then SLOW ones (Kuma "pending", or slower than `SLOW_MS`, default 2000 ms); monitors in maintenance are left out. Skip it if you already write the file yourself;
 - prints the URL and token to enter on the watch.
 
-Later: `sudo ./install.sh --show` prints the URL and token again (for another watch), `sudo ./install.sh --rotate` makes a new token (every watch then needs setting up again). Settings live in `/etc/wrist-check/env`; run the writer by hand with `wrist-check-status --print` after `set -a; . /etc/wrist-check/env`.
+Later, the same line with an option:
+
+```
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --show       # URL and token again
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --rotate     # new token, set watches up again
+curl -fsSL https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh | sudo bash -s -- --uninstall  # remove everything it added
+```
+
+Answers can also come from environment variables for a no-questions run, e.g. `curl ... | sudo DOMAIN=example.com KUMA_SLUG=homelab bash`. Settings live in `/etc/wrist-check/env`.
 
 Not using Caddy? Any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
 
@@ -124,7 +133,7 @@ app/src/main/java/uk/debil/status/
 app/src/main/AndroidManifest.xml
 app/src/main/res/drawable/ic_server.xml
 server/
-  install.sh              server setup: token, Caddy snippet, status writer + timer
+  install.sh              one-line server setup: token, Caddy snippet + import, status writer + timer
   kuma-status.py          writes status.json from an Uptime Kuma status page
 secrets.properties.example  optional build-time default URL + token
 ```
