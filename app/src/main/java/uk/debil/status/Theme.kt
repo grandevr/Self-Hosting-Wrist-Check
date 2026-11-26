@@ -1,6 +1,7 @@
 package uk.debil.status
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,9 +10,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -51,22 +54,30 @@ internal fun Status.headlineColor(): Color = when (kind) {
     else -> StatusColors.Slow
 }
 
-/** One service: a coloured dot and its name. Not clickable. */
+/** One service: a coloured dot and its name. With [onClick], tapping it opens its detail. */
 @Composable
-fun ServiceRow(name: String, color: Color, modifier: Modifier = Modifier) {
+fun ServiceRow(name: String, color: Color, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     Row(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(50))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = if (onClick != null) 7.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(8.dp).background(color, CircleShape))
         Spacer(Modifier.width(10.dp))
         Text(
             text = name,
+            modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+        if (onClick != null) {
+            Text("›", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

@@ -23,7 +23,7 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 
 - Both types carry a monochrome server icon.
 - Refreshes every 15 minutes (`UPDATE_PERIOD_SECONDS` 900). Opening the problem list (by tapping the complication) refreshes it right away via `ComplicationDataSourceUpdateRequester.requestUpdateAll()`.
-- Fetch: `GET <status URL>` with `Authorization: Bearer <token>`, 8 s connect/read timeouts, response capped at 32 KB, redirects not followed. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
+- Fetch: `GET <status URL>` with `Authorization: Bearer <token>`, 8 s connect/read timeouts, response capped at 96 KB, redirects not followed. The token is never logged. Uses the watch's own connection (phone over Bluetooth, or Wi-Fi/LTE).
 
 ## Problem list
 
@@ -31,6 +31,30 @@ Setup in short: run `server/install.sh` on the server, install the APK on the wa
 - The screens use Material 3 for Wear OS and pick up the watch's dynamic colours (Wear OS 6 takes them from the watch face). Status colours stay fixed: green for up, amber for slow, red for down.
 - Opening the screen, or tapping **Refresh**, also asks Wear OS to refresh the complication, so the watch face catches up at the same time.
 - Complications only get a single tap from the watch face; double tap and long press aren't passed to the app (long press opens watch face editing).
+
+## Service detail
+
+Tap a service in the list to open its detail screen (rows that can be opened end in `›`). It shows:
+
+- **status and since when**: `DOWN`, `SLOW`, `UP` or `PENDING`, e.g. "since 14:02 · 1 h 12 min" ("since before ..." when the change is older than the checks Kuma keeps on its status page);
+- **Kuma's message**: the last heartbeat message, e.g. `timeout of 48000ms exceeded` or `502 - Bad Gateway`;
+- **response time**: the latest ping, and a small graph of the last 40 checks (red ticks along the bottom are checks that got no answer);
+- **24h uptime** in percent;
+- **certificate expiry** in days, when **Show Certificate Expiry** is turned on for the Kuma status page.
+
+Everything comes from the same `status.json` the list already fetched, so opening a detail costs no extra request and no extra battery. Items the server doesn't send are left out. Each item can be turned off under **Settings** at the bottom of the list. Rows can only be tapped when the server sends `details` (the writer from `server/install.sh` does, from this version on; update it by running the installer again).
+
+The `details` object, keyed by service name (every field optional):
+
+```json
+"details": {
+  "PKVault": {"state":"down","since":1795637400,"msg":"timeout of 48000ms exceeded","ping":null,
+              "pings":[120,118,null,null],"up24":95.83},
+  "Jellyfin": {"state":"up","since":1795600000,"before":true,"ping":144,"pings":[150,144],"up24":100,"cert":41}
+}
+```
+
+`state` is `up`, `down`, `slow` or `pending`; `since` is unix time; `pings` are milliseconds, oldest first, `null` for a check with no answer; `up24` is percent; `cert` is days left.
 
 ## Optional: list working services
 
@@ -183,6 +207,11 @@ DOWN monitors come first, then SLOW ones. Within each, the groups in `PRIORITY_G
 
 **Per-monitor settings (optional).** Two Kuma tags tune single monitors: `slow_ms` with a value (that monitor's own SLOW limit, 0 = never SLOW) and `priority` with the value `high` (listed before everything else). The status page only passes tags along with **Show Tags** turned on, and that also shows the tags to anyone who can open the page. If you'd rather keep tags hidden, leave it off and use `PRIORITY_GROUPS` and `SLOW_MS` instead.
 
+The writer also adds `details` for the watch's detail screen (see [Service detail](#service-detail)). Two settings tune its size; the defaults suit most setups, and they can be set with `sudo systemctl edit wrist-check-status` (`[Service]` then `Environment=DETAIL_POINTS=20`):
+
+- `DETAIL_POINTS`: response times per monitor for the graph, default 40 (0 = no graph);
+- `MAX_BYTES`: size limit for `status.json`, default 60000. When the file would be bigger, the graphs get fewer points, and as a last resort `details` is left out. The watch reads at most 96 KB.
+
 Using something not listed? Pick `other`: any web server works if it answers 200 with the file for `Authorization: Bearer <token>` and 404 for anything else.
 
 ## Watch setup
@@ -194,7 +223,7 @@ Using something not listed? Pick `other`: any web server works if it answers 200
 
 No Wi-Fi, or a different network? Tap the keyboard button at the bottom edge (**Enter on watch**) and type the URL and token on the watch (the Wear OS keyboard can take input from the paired phone, which helps with the long token).
 
-To change the URL or token later: open the status list (tap the complication) → **Settings** at the bottom.
+To change the URL or token later: open the status list (tap the complication) → **Settings** at the bottom → **Setup**. Settings also has the switches for the detail screen.
 
 How it's kept safe:
 - The setup page is served by the watch itself, only while the setup screen is open (10 minutes at most), and only on its Wi-Fi address. Saving needs the PIN from the watch screen; after 5 wrong PINs a new one is drawn.
@@ -276,7 +305,7 @@ Logs: `adb logcat -s DebilStatus`
 
 The app has no background service, wake lock, alarm or scheduled job. Wear OS asks the
 complication for data every 15 minutes, and each ask is one small HTTPS request (8-second
-timeouts, at most 32 KB). Requests that arrive close together (both complication types, a watch
+timeouts, at most 96 KB). Requests that arrive close together (both complication types, a watch
 face rebinding, the list screen opening) share one result for up to a minute. The setup screen
 turns Wi-Fi on and keeps the screen awake only while it is open, for at most 10 minutes.
 
@@ -302,6 +331,10 @@ app/src/main/java/uk/debil/status/
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
   ProblemsActivity.kt     scrollable full list (or categories), opened by tapping the complication
+  DetailActivity.kt       one service's detail, opened by tapping it in the list
+  Detail.java             one service from the optional "details" field
+  SettingsActivity.kt     detail screen switches and the Setup button
+  DisplayPrefs.kt         which detail items are shown
   Theme.kt                Material 3 theme, status colours and shared list rows
   Group.java              one category from the optional "groups" field
   Refresh.java            asks Wear OS to update the complication now

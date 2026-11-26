@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
 final class StatusFetcher {
     private static final String TAG = "DebilStatus";
     private static final int TIMEOUT_MS = 8000;
-    private static final int MAX_BYTES = 32 * 1024;
+    private static final int MAX_BYTES = 96 * 1024; // room for the optional per-service detail
     private static final Pattern HH_MM = Pattern.compile("\\d{1,2}:\\d{2}");
 
     private StatusFetcher() {}
@@ -97,7 +97,7 @@ final class StatusFetcher {
             } catch (Exception e) {
                 Log.w(TAG, "status.json unreadable: " + e.getClass().getSimpleName());
                 return new Result(false, Status.offline(),
-                        "The server answered, but not with a status.json file (or it's over 32 KB).");
+                        "The server answered, but not with a status.json file (or it's over 96 KB).");
             }
             return new Result(true, s, "Connected. The watch shows: " + s.shortText());
         } catch (Exception e) {
@@ -156,6 +156,16 @@ final class StatusFetcher {
                 group.problems.addAll(strings(g.optJSONArray("problems")));
                 group.up.addAll(strings(g.optJSONArray("up")));
                 status.groups.add(group);
+            }
+        }
+        // Optional: per-service detail for the detail screen, {"<name>": {...}}.
+        JSONObject details = json.optJSONObject("details");
+        if (details != null) {
+            java.util.Iterator<String> names = details.keys();
+            while (names.hasNext()) {
+                String name = names.next();
+                Detail d = Detail.parse(details.optJSONObject(name));
+                if (d != null && !name.trim().isEmpty()) status.details.put(name.trim(), d);
             }
         }
         return status;

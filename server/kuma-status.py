@@ -15,6 +15,9 @@ Settings come from environment variables (install.sh puts them in /etc/wrist-che
                    ignore (default, leave it out) | slow (report "<Name> SLOW") | down ("<Name> DOWN")
   PRIORITY_GROUPS  comma-separated status page group names whose problems come first, in that
                    order, e.g. "Public,Jobs,Host". Empty = the order of the status page.
+  DETAIL_POINTS    how many recent response times to send per monitor for the watch's sparkline
+                   (default 40, 0 = none). Lowered automatically if the file would pass MAX_BYTES.
+  MAX_BYTES        size limit for status.json (default 60000; the watch reads at most 96 KB)
 
 Per-monitor settings, read from Kuma tags (turn on "Show Tags" on the status page):
   slow_ms:<ms>     this monitor's own SLOW limit (0 = never SLOW)
@@ -26,6 +29,15 @@ Output, e.g.:
    "groups":[{"name":"Media","problems":["PKVault DOWN"],"up":["Immich","Jellyfin"]}],
    "updated":1795637760}
 DOWN problems come before SLOW ones. "groups" follows the groups on the Kuma status page.
+"details" has one entry per listed monitor, keyed by its name, for the watch's detail screen:
+  {"state":"down","since":1795637400,"msg":"timeout of 48000ms exceeded","ping":null,
+   "pings":[120,118,null,...],"up24":99.31,"cert":41}
+  state  up | down | slow | pending       since  unix time the state began ("before": true when
+  msg    Kuma's last message (cut to 120)        it began before the oldest check Kuma sent)
+  ping   latest response time in ms         pings  recent response times, oldest first, null = down
+  up24   24-hour uptime in percent          cert   days until the TLS certificate expires (only with
+                                                   "Show Certificate Expiry" on the status page)
+Fields Kuma doesn't provide are left out.
 If Kuma can't be read: "short" is "Kuma DOWN", "count" is 0 and an "error" field is present.
 
   kuma-status.py            write OUT
@@ -33,6 +45,7 @@ If Kuma can't be read: "short" is "Kuma DOWN", "count" is 0 and an "error" field
   kuma-status.py --summary  print one line, e.g. "2 problems: PKVault DOWN, Immich SLOW"
   kuma-status.py --check    only check that the status page exists (exit 0 ok, 3 no such page, 4 other error)
 """
+import datetime
 import json
 import os
 import sys
@@ -63,6 +76,9 @@ PENDING_MODE = (os.environ.get("PENDING", "") or "ignore").strip().lower()
 if PENDING_MODE not in ("ignore", "slow", "down"):
     sys.exit("PENDING must be ignore, slow or down")
 PRIORITY_GROUPS = [g.strip().lower() for g in os.environ.get("PRIORITY_GROUPS", "").split(",") if g.strip()]
+DETAIL_POINTS = int_env("DETAIL_POINTS", 40)
+MAX_BYTES = max(4000, int_env("MAX_BYTES", 60000))
+MSG_MAX = 120
 
 
 class NoSuchPage(Exception):
@@ -129,19 +145,91 @@ def priority_rank(tags, group_name):
     return 1 + len(PRIORITY_GROUPS)
 
 
+def beat_time(beat):
+    """Kuma heartbeat time ("2026-11-26 21:30:00.123", UTC) as unix seconds, or None."""
+    t = str(beat.get("time") or "").strip().replace("T", " ").rstrip("Z")
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            d = datetime.datetime.strptime(t, fmt)
+            return int(d.replace(tzinfo=datetime.timezone.utc).timestamp())
+        except ValueError:
+            pass
+    return None
+
+
+def detail(mon, history, state, uptime, limit=0):
+    """Detail for the watch's detail screen. Only fields Kuma actually gave us."""
+    last = history[-1]
+    d = {"state": state}
+    status = last.get("status")
+
+    def same(beat):  # still in the current state (for SLOW: UP and over the limit)
+        if beat.get("status") != status:
+            return False
+        p = beat.get("ping")
+        return state != "slow" or (isinstance(p, (int, float)) and p > limit)
+
+    i = len(history) - 1
+    while i > 0 and same(history[i - 1]):
+        i -= 1
+    since = beat_time(history[i])
+    if since:
+        d["since"] = since
+        if i == 0:
+            d["before"] = True  # the state started before the oldest check we have
+    msg = " ".join(str(last.get("msg") or "").split())
+    if msg:
+        d["msg"] = msg[:MSG_MAX]
+    ping = last.get("ping")
+    d["ping"] = int(round(ping)) if isinstance(ping, (int, float)) and status == UP else None
+    pings = []
+    for b in history:
+        p = b.get("ping")
+        pings.append(int(round(p)) if isinstance(p, (int, float)) and b.get("status") == UP else None)
+    d["pings"] = pings  # trimmed to DETAIL_POINTS in build()
+    if isinstance(uptime, (int, float)):
+        d["up24"] = round(uptime * 100, 2)
+    cert = mon.get("certExpiryDaysRemaining")
+    if isinstance(cert, (int, float)) and mon.get("validCert", True) is not False:
+        d["cert"] = int(cert)
+    return d
+
+
+def fit(status):
+    """Trims the sparklines so the file stays under MAX_BYTES. Returns the JSON text."""
+    details = status.get("details") or {}
+    full = {n: d.get("pings") or [] for n, d in details.items()}
+    points = DETAIL_POINTS
+    while True:
+        for n, d in details.items():
+            if points:
+                d["pings"] = full[n][-points:]
+            else:
+                d.pop("pings", None)
+        text = json.dumps(status, separators=(",", ":"))
+        if len(text.encode()) <= MAX_BYTES or points == 0:
+            break
+        points //= 2
+    if len(text.encode()) > MAX_BYTES and details:  # still too big: leave the detail out
+        status = {k: v for k, v in status.items() if k != "details"}
+        text = json.dumps(status, separators=(",", ":"))
+    return text
+
+
 def build():
     now = int(time.time())
     title = time.strftime("%H:%M", time.localtime(now))
     try:
         page = fetch_page()
         beats = get("/api/status-page/heartbeat/" + urllib.parse.quote(KUMA_SLUG, safe=""))
+        uptimes = (beats.get("uptimeList") or {}) if isinstance(beats, dict) else {}
         beats = beats.get("heartbeatList", {}) if isinstance(beats, dict) else {}
     except Exception as e:  # Kuma down, wrong slug, ...
         return {"short": "Kuma DOWN", "title": title, "count": 0, "problems": [],
                 "error": type(e).__name__, "updated": now}
 
     # Each problem: (kind 0=DOWN 1=SLOW, priority rank, position on the page, label, group index)
-    found, up, groups = [], [], []
+    found, up, groups, details = [], [], [], {}
     seen = set()
     pos = 0
     for group in page.get("publicGroupList") or []:
@@ -173,9 +261,12 @@ def build():
                 else:
                     g_up.append(name)
                     has_any = True
+                    details[name] = detail(mon, history, "up", uptimes.get("%s_24" % mid))
                     continue
             else:
                 continue  # MAINTENANCE (or unknown): left out on purpose
+            state = "pending" if status == PENDING else ("down" if kind == 0 else "slow")
+            details[name] = detail(mon, history, state, uptimes.get("%s_24" % mid), slow_limit(tags))
             label = name + (" DOWN" if kind == 0 else " SLOW")
             found.append((kind, rank, pos, label, gi))
             has_any = True
@@ -189,7 +280,7 @@ def build():
     groups = [{"name": g["name"], "problems": g["problems"], "up": g["up"]} for g in groups if g["_keep"]]
     return {"short": problems[0] if problems else "ALL UP", "title": title,
             "count": len(problems), "problems": problems, "up": up, "groups": groups,
-            "updated": now}
+            "details": details, "updated": now}
 
 
 def write_atomic(path, data):
@@ -198,7 +289,7 @@ def write_atomic(path, data):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".status-", suffix=".json")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(data, f, separators=(",", ":"))
+            f.write(fit(data))
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
@@ -230,7 +321,7 @@ def main():
         sys.exit(check())
     status = build()
     if "--print" in sys.argv:
-        print(json.dumps(status, indent=2))
+        print(json.dumps(json.loads(fit(status)), indent=2))
     elif "--summary" in sys.argv:
         if "error" in status:
             print("Kuma DOWN (%s)" % status["error"])

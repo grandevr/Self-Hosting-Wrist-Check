@@ -48,6 +48,18 @@
             </intent-filter>
         </activity>
 
+        <!-- One service's detail, opened by tapping it in the list -->
+        <activity
+            android:name=".DetailActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault" />
+
+        <!-- Settings: detail screen items, and the Setup button -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault" />
+
         <!-- Setup: QR code + local web page for entering the URL and token from a phone or computer -->
         <activity
             android:name=".SetupActivity"

@@ -1,7 +1,9 @@
 package uk.debil.status;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 
 /** Parsed status.json plus how the complication should word it. */
@@ -18,6 +20,14 @@ final class Status {
     final List<String> up = new ArrayList<>();
     /** Categories from the optional "groups" array; empty means show the flat list. */
     final List<Group> groups = new ArrayList<>();
+    /** Per-service detail from the optional "details" object, keyed by service name. */
+    final Map<String, Detail> details = new HashMap<>();
+
+    /** Detail for a problem label ("Sonarr DOWN") or a service name, or null. */
+    Detail detailFor(String labelOrName) {
+        Detail d = details.get(labelOrName);
+        return d != null ? d : details.get(Detail.nameOf(labelOrName));
+    }
 
     private Status(Kind kind, List<String> problems, String checkedAt) {
         this.kind = kind;
