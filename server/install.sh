@@ -14,9 +14,17 @@
 # Any of these with --dry-run: look around, ask, and show the plan, without changing anything.
 #
 # Later:
+#   --verify      test the status URL from any machine: answers with the token, 404 without it
+#   --upgrade     install the latest writer and token check with the saved settings, no questions
+#                 (running the installer again does the same, but asks again)
 #   --show        print the URL and token (to set up another watch); nothing prints the token otherwise
 #   --rotate      make a new token (every watch must be set up again)
 #   --uninstall   remove what this script added; with --writer-only / --route-only only that part
+#   --version     print which version this is
+#
+# Pinned to a release: use the install.sh attached to it,
+#   https://github.com/grandevr/Self-Hosting-Wrist-Check/releases/download/<tag>/install.sh
+# It downloads only that release's files and refuses them unless they match the checksums built into it.
 #
 # Without curl (python3 is enough):
 #   python3 -c "import urllib.request,sys;sys.stdout.buffer.write(urllib.request.urlopen('https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/main/server/install.sh').read())" | sudo bash -s -- --writer-only
@@ -37,17 +45,24 @@
 # (or with NONINTERACTIVE=yes) the required ones must be given, nothing is guessed. See the README.
 #   Route:  DOMAIN  STATUS_PATH  ROUTE=file|check-only|proxy  UPSTREAM  PROTECT=file|folder
 #           TOKEN_FILE  TOKEN  OLD_CHECK=disable|keep  CADDYFILE  CADDY_SNIPPET  EDIT_CADDYFILE
-#           SKIP_VALIDATE  RELOAD_CMD  SNIPPET_OUT (with --print-snippet: write to this file)
-#   Writer: KUMA_URL  KUMA_SLUG  OUT  OUT_ACCESS=acl|owner  SLOW_MS  SLOW_RUNS  PENDING=ignore|slow|down
+#           SKIP_VALIDATE  RELOAD_CMD  SKIP_VERIFY  SNIPPET_OUT (with --print-snippet: write to this file)
+#           SAVE_TOKEN=no (with --print-snippet: don't keep a copy of the token in the settings folder)
+#   Writer: KUMA_URL  KUMA_SLUG  OUT  OUT_ACCESS=acl|chown|owner  SLOW_MS  SLOW_RUNS  PENDING=ignore|slow|down
 #           PRIORITY_GROUPS  WRITER_USER  WRITER_SRC  SKIP_KUMA_CHECK
 #   nginx:  NGINX_DIR  NGINX_SNIPPET  NGINX_SITE (the file with the server { } for DOMAIN)
 #   Both:   ROLE=all|writer|route  PROXY  CONF_DIR
+#   --verify: STATUS_URL  TOKEN_FILE (or the saved token, or it asks)
 # Needs: bash and coreutils. Writer: python3, systemd. curl only to pipe this script.
 
 # Everything runs from main() at the very end, so a half-downloaded script never runs partly.
 set -euo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/grandevr/Self-Hosting-Wrist-Check/${WRIST_CHECK_REF:-main}/server"
+# A tagged release sets these three (see .github/workflows/release.yml): the files it downloads must
+# then match the checksums, so a pinned install.sh only ever runs the code from its own release.
+VERSION=main
+WRITER_SHA256=""
+PROXIES_SHA256=""
 IS_ROOT=no; [ "$(id -u)" -eq 0 ] && IS_ROOT=yes
 if [ "$IS_ROOT" = yes ]; then CONF_DIR=${CONF_DIR:-/etc/wrist-check}
 else CONF_DIR=${CONF_DIR:-${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}/wrist-check}; fi
@@ -61,9 +76,10 @@ DEFAULT_OUT=/var/lib/wrist-check/status.json
 DATA_DIR=/var/lib/wrist-check
 WRITER_BIN=${WRITER_BIN:-/usr/local/bin/wrist-check-status}
 UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
-SETTINGS="ROLE PROXY DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM PROTECT KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER OUT_ACCESS"
+SETTINGS="ROLE PROXY DOMAIN STATUS_PATH STATUS_URL ROUTE UPSTREAM PROTECT OLD_CHECK KUMA_URL KUMA_SLUG OUT SLOW_MS SLOW_RUNS PENDING PRIORITY_GROUPS WRITER_USER OUT_ACCESS OUT_OWNER"
 TMP_DIR=""
 USED_LOCAL_WRITER=""
+USED_LOCAL_PROXIES=""
 exec 3>&1   # messages; moved to stderr by --print-snippet so stdout is only the snippet
 
 die() { echo "Error: $*" >&2; exit 1; }
@@ -127,6 +143,7 @@ save_env() {
     echo "# Wrist Check settings, written by install.sh. Also read by the status writer's systemd unit."
     for key in $SETTINGS; do
       val=${!key:-}
+      [ "$key" = OLD_CHECK ] && [ "$val" != keep ] && val=""   # only "keep" is a lasting choice
       [[ "$val" == *[\"\\\$\`]* ]] && die "$key can't contain quotes, backslashes, \$ or backticks"
       printf '%s="%s"\n' "$key" "$val"
     done
@@ -198,10 +215,10 @@ snippet_text() { # the token check for the chosen proxy
   case "${PROXY:-caddy}" in
     caddy) caddy_text ;;
     nginx|npm) nginx_text ;;
-    apache) apache_text ;;
-    haproxy) haproxy_text ;;
-    traefik) traefik_text ;;
-    *) other_text ;;
+    apache) load_proxies; apache_text ;;
+    haproxy) load_proxies; haproxy_text ;;
+    traefik) load_proxies; traefik_text ;;
+    *) load_proxies; other_text ;;
   esac
 }
 
@@ -446,12 +463,18 @@ restore() {
 
 can_write_snippet() { [ -w "$(dirname "$CADDY_SNIPPET")" ] || { [ -f "$CADDY_SNIPPET" ] && [ -w "$CADDY_SNIPPET" ]; }; }
 
-caddy_readable() { # caddy_readable FILE: let Caddy (group caddy) read FILE, keep others out where possible
-  if getent group caddy >/dev/null 2>&1 && chgrp caddy "$1" 2>/dev/null; then
+caddy_readable() { # caddy_readable FILE: let Caddy read FILE (it holds the token), and keep everyone else out
+  # 1. an ACL for the caddy user (works without root when setfacl is installed), 2. group caddy,
+  # 3. only then readable by all, with a warning.
+  chmod 600 "$1"
+  if id caddy >/dev/null 2>&1 && command -v setfacl >/dev/null && setfacl -m u:caddy:r "$1" 2>/dev/null; then
+    :   # owner read/write, caddy read, nobody else (ls shows the ACL mask as group "r")
+  elif getent group caddy >/dev/null 2>&1 && chgrp caddy "$1" 2>/dev/null; then
     chmod 640 "$1"
   else
     chmod 644 "$1"
-    [ "$IS_ROOT" = yes ] || msg "Note: $1 is readable by every local user, so Caddy can read it (it holds the token)."
+    msg "Note: $1 is readable by every local user, so Caddy can read it (it holds the token)."
+    msg "      Installing setfacl (package acl) or joining the caddy group avoids that."
   fi
 }
 
@@ -709,90 +732,6 @@ NGINX
   esac
 }
 
-apache_text() {
-  cat <<APACHE
-# Wrist Check (install.sh, Apache, ROUTE=$ROUTE): requests for $(prefix_path) without the right token get 404.
-# Goes inside the <VirtualHost *:443> for $DOMAIN. Needs mod_rewrite.
-RewriteEngine On
-RewriteCond "%{HTTP:Authorization}" "!=Bearer $TOKEN"
-RewriteRule "$(path_regex)" - [R=404,L]
-APACHE
-  case "$ROUTE" in
-    file) cat <<APACHE
-Alias "$STATUS_PATH" "$OUT"
-<Directory "$(dirname "$OUT")">
-	Require all granted
-</Directory>
-APACHE
-    ;;
-    proxy) cat <<APACHE
-# Needs mod_proxy_http and mod_headers.
-<Location "$(prefix_path)">
-	RequestHeader unset Authorization
-</Location>
-ProxyPass "$(prefix_path)" "$(upstream_url)$(prefix_path)"
-ProxyPassReverse "$(prefix_path)" "$(upstream_url)$(prefix_path)"
-APACHE
-    ;;
-  esac
-}
-
-haproxy_text() {
-  local cond="path $STATUS_PATH"
-  [ "${PROTECT:-file}" = folder ] && cond="path_beg $(prefix_path)"
-  cat <<HAPROXY
-# Wrist Check (install.sh, HAProxy): requests for $(prefix_path) without the right token get 404.
-# Goes in the frontend that serves $DOMAIN. Requests with the token go to your usual backend.
-http-request deny deny_status 404 if { $cond } !{ req.hdr(authorization) -m str "Bearer $TOKEN" }
-HAPROXY
-}
-
-traefik_text() {
-  local rule="Path(\`$STATUS_PATH\`)"
-  [ "${PROTECT:-file}" = folder ] && rule="PathPrefix(\`$(prefix_path)\`)"
-  cat <<TRAEFIK
-# Wrist Check (install.sh, Traefik file provider, v3 rule syntax; on v2 write Headers( instead of
-# Header( and ipWhiteList instead of ipAllowList). Requests for $(prefix_path) with the right token go to
-# $(upstream_url); without it Traefik answers 403 (it has no built-in 404 reply).
-http:
-  routers:
-    wrist-check:
-      rule: "Host(\`$DOMAIN\`) && $rule && Header(\`Authorization\`, \`Bearer $TOKEN\`)"
-      priority: 10001
-      tls: {}
-      middlewares: [wrist-check-strip]
-      service: wrist-check
-    wrist-check-denied:
-      rule: "Host(\`$DOMAIN\`) && $rule"
-      priority: 10000
-      tls: {}
-      middlewares: [wrist-check-deny]
-      service: noop@internal
-  middlewares:
-    wrist-check-strip:
-      headers:
-        customRequestHeaders:
-          Authorization: ""
-    wrist-check-deny:
-      ipAllowList:
-        sourceRange: ["127.0.0.1/32"]
-  services:
-    wrist-check:
-      loadBalancer:
-        servers:
-          - url: "$(upstream_url)"
-TRAEFIK
-}
-
-other_text() {
-  cat <<OTHER
-# Wrist Check: the rule for any web server or proxy in front of $DOMAIN.
-#   Requests for $(prefix_path)
-#   with the header   Authorization: Bearer $TOKEN   -> handle as usual (pass on, or serve the file)
-#   without it                                      -> answer 404
-OTHER
-}
-
 # Steps after printing, for the proxies the script doesn't change itself. $1 = step number to start at.
 paste_steps() {
   local n=$1 where=${SNIPPET_OUT:-}
@@ -801,21 +740,7 @@ paste_steps() {
       if [ -n "$where" ]; then msg "  $n. Add  include $where;  inside the server { } for $DOMAIN (next to server_name)."
       else msg "  $n. Paste the lines above inside the server { } for $DOMAIN (next to server_name)."; fi
       msg "  $((n + 1)). Check and reload:  sudo nginx -t && sudo systemctl reload nginx" ;;
-    npm)
-      msg "  $n. In Nginx Proxy Manager: Hosts > Proxy Hosts > $DOMAIN > Edit > Advanced. Paste the lines above"
-      msg "     into \"Custom Nginx Configuration\" and save (NPM checks the config when you save)." ;;
-    traefik)
-      msg "  $n. Save the lines above as a .yml file in the folder Traefik's file provider watches"
-      msg "     (providers.file.directory, e.g. /etc/traefik/dynamic/wrist-check.yml). Traefik loads it by itself." ;;
-    apache)
-      msg "  $n. Paste the lines above inside the <VirtualHost *:443> for $DOMAIN."
-      msg "     Turn on the modules they use: sudo a2enmod rewrite$([ "$ROUTE" = proxy ] && echo ' proxy_http headers')"
-      msg "  $((n + 1)). Check and reload:  sudo apachectl configtest && sudo systemctl reload apache2" ;;
-    haproxy)
-      msg "  $n. Paste the line above into the frontend that serves $DOMAIN, before its use_backend lines."
-      msg "  $((n + 1)). Check and reload:  sudo haproxy -c -f /etc/haproxy/haproxy.cfg && sudo systemctl reload haproxy" ;;
-    other)
-      msg "  $n. Set up that rule in your web server or proxy." ;;
+    *) load_proxies; proxy_steps "$n" ;;
   esac
 }
 
@@ -965,9 +890,13 @@ ask_proxy() {
 
 ask_writer() {
   suggest KUMA_URL "$D_KUMA_URL"
-  if [ -n "$D_SLUGS" ] && [ -z "${KUMA_SLUG:-}" ]; then
-    [ "${D_SLUGS// /}" != "$D_SLUGS" ] && msg "Kuma has these status pages: $D_SLUGS"
-    KUMA_SLUG=${D_SLUGS%% *}
+  if have_tty && [ -z "${KUMA_SLUG:-}" ]; then
+    if [ -n "$D_SLUGS" ]; then
+      [ "${D_SLUGS// /}" != "$D_SLUGS" ] && msg "Kuma has these status pages: $D_SLUGS"
+      KUMA_SLUG=${D_SLUGS%% *}
+    elif [ -n "$D_KUMA_URL" ]; then
+      msg "Couldn't list Kuma's status pages from here (Kuma 2 with MariaDB keeps them out of reach), so enter the slug."
+    fi
   fi
   if have_tty && [ "$ROLE" = writer ] && [ -z "${OUT:-}" ]; then
     detect_out
@@ -976,7 +905,7 @@ ask_writer() {
   fi
   ask KUMA_URL "Uptime Kuma URL (as seen from this machine)" "${KUMA_URL:-http://127.0.0.1:3001}"
   check KUMA_URL '^https?://[^[:space:]]+$' "a URL like http://127.0.0.1:3001"
-  need KUMA_SLUG "Slug of the Kuma status page listing the monitors" "the last part of the status page URL, /status/<slug>"
+  need KUMA_SLUG "Slug of the Kuma status page listing the monitors" "the last part of the status page's URL, /status/<slug>"
   check KUMA_SLUG '^[A-Za-z0-9_-]+$' "letters, digits, - and _"
   ask OUT "File to write the status to (Caddy or your web server serves it)" "${OUT:-$DEFAULT_OUT}"
   check OUT '^/[A-Za-z0-9._/-]+$' "an absolute path without spaces"
@@ -996,22 +925,52 @@ ask_writer() {
   check_kuma
 }
 
-fetch_writer() { # sets WRITER_SRC to a local kuma-status.py
-  if [ -n "${WRITER_SRC:-}" ]; then [ -r "$WRITER_SRC" ] || die "can't read WRITER_SRC=$WRITER_SRC"; return 0; fi
-  if [ -f "$0" ] && [ "$(basename "$0")" = install.sh ] && [ -f "$(dirname "$0")/kuma-status.py" ]; then
-    WRITER_SRC="$(dirname "$0")/kuma-status.py"; USED_LOCAL_WRITER=$WRITER_SRC; return 0
-  fi
-  TMP_DIR=$(mktemp -d)
-  WRITER_SRC="$TMP_DIR/kuma-status.py"
+tmp_dir() { [ -n "$TMP_DIR" ] || TMP_DIR=$(mktemp -d); }
+
+local_file() { # local_file NAME: NAME next to this script, when it was run from a downloaded install.sh
+  [ -f "$0" ] && [ "$(basename "$0")" = install.sh ] && [ -f "$(dirname "$0")/$1" ] || return 1
+  echo "$(dirname "$0")/$1"
+}
+
+download() { # download NAME DEST SHA256: a file from this script's release (or main); checked if SHA256 is set
+  local url="$REPO_RAW/$1" got
   if command -v curl >/dev/null; then
-    curl -fsSL "$REPO_RAW/kuma-status.py" -o "$WRITER_SRC" || die "couldn't download $REPO_RAW/kuma-status.py"
-  else
-    python3 - "$REPO_RAW/kuma-status.py" "$WRITER_SRC" <<'PY' || die "couldn't download the status writer"
+    curl -fsSL "$url" -o "$2" || die "couldn't download $url"
+  elif command -v python3 >/dev/null; then
+    python3 - "$url" "$2" <<'PY' || die "couldn't download $url"
 import sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=30) as r, open(sys.argv[2], "wb") as f:
     f.write(r.read())
 PY
+  else
+    die "can't download $1: needs curl or python3"
   fi
+  check_sum "$2" "$3"
+}
+
+check_sum() { # check_sum FILE SHA256: a release only uses its own files (no SHA256 = not a release)
+  [ -n "$2" ] || return 0
+  local got; got=$(sha256sum "$1" | cut -d' ' -f1)
+  [ "$got" = "$2" ] || die "$1 isn't the $(basename "$1") of release $VERSION (sha256 $got): not using it"
+}
+
+fetch_writer() { # sets WRITER_SRC to a local kuma-status.py
+  if [ -n "${WRITER_SRC:-}" ]; then [ -r "$WRITER_SRC" ] || die "can't read WRITER_SRC=$WRITER_SRC"; return 0; fi
+  if WRITER_SRC=$(local_file kuma-status.py); then
+    check_sum "$WRITER_SRC" "$WRITER_SHA256"; USED_LOCAL_WRITER=$WRITER_SRC; return 0
+  fi
+  tmp_dir
+  WRITER_SRC="$TMP_DIR/kuma-status.py"
+  download kuma-status.py "$WRITER_SRC" "$WRITER_SHA256"
+}
+
+load_proxies() { # the printers for npm, Traefik, Apache, HAProxy and "other" live in proxies.sh
+  declare -F proxy_steps >/dev/null && return 0
+  local f
+  if f=$(local_file proxies.sh); then check_sum "$f" "$PROXIES_SHA256"; USED_LOCAL_PROXIES=$f
+  else tmp_dir; f="$TMP_DIR/proxies.sh"; download proxies.sh "$f" "$PROXIES_SHA256"; fi
+  # shellcheck source=proxies.sh
+  . "$f"
 }
 
 check_kuma() {
@@ -1029,13 +988,15 @@ check_kuma() {
 #   new     the folder doesn't exist yet: it's created for the writer
 #   ok      the writer's user can already write there (or it's this script's own folder)
 #   acl     give the writer's user write access to that one folder (setfacl)
+#   chown   give that one folder to the writer's user; the old owner is saved (OUT_OWNER) and gets it
+#           back on --uninstall
 #   owner   run the writer as the folder's owner instead
 plan_out_access() {
   local dir owner; dir=$(dirname "$OUT")
   if [ ! -e "$dir" ]; then OUT_ACCESS=new; return 0; fi
   [ -d "$dir" ] || die "$dir isn't a folder"
   if [ "$dir" = "$DATA_DIR" ] || writable_by "$WRITER_USER" "$dir"; then
-    [ "${OUT_ACCESS:-}" = acl ] || OUT_ACCESS=ok
+    case "${OUT_ACCESS:-}" in acl|chown) ;; *) OUT_ACCESS=ok ;; esac   # keep what an earlier run set up
     return 0
   fi
   owner=$(stat -c %U "$dir")
@@ -1045,18 +1006,23 @@ plan_out_access() {
       msg ""
       msg "The writer runs as the user $WRITER_USER, which can't write to $dir (it belongs to $owner)."
       command -v setfacl >/dev/null && msg "  acl    let $WRITER_USER write to that folder only (nothing else changes)"
-      msg "  owner  run the writer as $owner instead"
-      if command -v setfacl >/dev/null; then ask OUT_ACCESS "Answer (acl / owner)" "acl"; else ask OUT_ACCESS "Answer (owner / stop)" "owner"; fi
-      [ "$OUT_ACCESS" = stop ] && die "stopped, nothing changed."
+      msg "  chown  give that folder to $WRITER_USER ($owner gets it back on --uninstall)"
+      msg "  owner  run the writer as $owner instead$([ "$owner" = root ] && echo ' (not recommended for root)')"
+      if command -v setfacl >/dev/null; then ask OUT_ACCESS "Answer (acl / chown / owner)" "acl"
+      else ask OUT_ACCESS "Answer (chown / owner)" "chown"; fi
     else
       die "the writer's user $WRITER_USER can't write to $dir (it belongs to $owner), and nothing was changed.
-Set OUT_ACCESS=acl to let $WRITER_USER write to that folder (needs setfacl), or OUT_ACCESS=owner to run
-the writer as $owner."
+Set one of:  OUT_ACCESS=acl    let $WRITER_USER write to that folder (needs setfacl, package acl)
+             OUT_ACCESS=chown  give the folder to $WRITER_USER; $owner gets it back on --uninstall
+             OUT_ACCESS=owner  run the writer as $owner"
     fi
   fi
-  check OUT_ACCESS '^(acl|owner)$' "acl or owner"
-  if [ "$OUT_ACCESS" = owner ]; then WRITER_USER=$owner
-  else command -v setfacl >/dev/null || die "OUT_ACCESS=acl needs setfacl (package acl), or use OUT_ACCESS=owner"; fi
+  check OUT_ACCESS '^(acl|chown|owner)$' "acl, chown or owner"
+  case "$OUT_ACCESS" in
+    owner) WRITER_USER=$owner ;;
+    acl) command -v setfacl >/dev/null || die "OUT_ACCESS=acl needs setfacl (package acl); OUT_ACCESS=chown works without it" ;;
+    chown) OUT_OWNER=$(stat -c %U:%G "$dir") ;;
+  esac
 }
 
 writable_by() { # writable_by USER DIR
@@ -1082,6 +1048,10 @@ install_writer() {
   case "$OUT_ACCESS" in
     new) install -d -m 755 -o "$WRITER_USER" "$out_dir" ;;
     acl) setfacl -m "u:$WRITER_USER:rwx" "$out_dir" && msg "Let $WRITER_USER write to $out_dir (ACL)." ;;
+    chown)
+      [ "$(stat -c %U "$out_dir")" = "$WRITER_USER" ] || {
+        chown "$WRITER_USER" "$out_dir" && msg "Gave $out_dir to $WRITER_USER (it was $OUT_OWNER; --uninstall gives it back)."
+      } ;;
   esac
   [ "$out_dir" = "$DATA_DIR" ] && chown "$WRITER_USER" "$out_dir"
   writable_by "$WRITER_USER" "$out_dir" || die "$WRITER_USER still can't write to $out_dir (check the folders above it)"
@@ -1125,8 +1095,8 @@ UNIT
 }
 
 # ------------------------------------------------------------------------------------ detection
-# Only with a terminal: what's found becomes the suggested answer, and you confirm or change it.
-# Without a terminal nothing is guessed: answers come from the environment or the saved settings.
+# What's found is always reported. Only with a terminal does it become the suggested answer, which you
+# confirm or change; without one nothing is guessed: answers come from the environment or saved settings.
 
 D_PROXIES=""; D_ROLE=""; D_KUMA_URL=""; D_SLUGS=""; D_CADDY=""; D_DOMAIN=""; D_ROUTE=""; D_UPSTREAM=""; D_OUT=""; D_OTHER_TIMERS=""
 
@@ -1240,12 +1210,12 @@ detect_other_timers() { # an older status writer that should go once this one wo
     | grep -iE 'kuma|status|health' | grep -v '^wrist-check' | tr '\n' ' ' || true)
 }
 
-detect_all() {
-  have_tty || return 0
+detect_all() { # with or without a terminal, so the log shows what was found; only a terminal uses it
   msg "Looking around this machine..."
   detect_kuma; detect_caddy; detect_other_timers
   local py=no; command -v python3 >/dev/null && py=yes
-  if [ -n "$D_KUMA_URL" ]; then msg "  Uptime Kuma:  $D_KUMA_URL${D_SLUGS:+ (status pages: $D_SLUGS)}"
+  if [ -n "$D_KUMA_URL" ] && [ -n "$D_SLUGS" ]; then msg "  Uptime Kuma:  $D_KUMA_URL (status pages: $D_SLUGS)"
+  elif [ -n "$D_KUMA_URL" ]; then msg "  Uptime Kuma:  $D_KUMA_URL (couldn't list its status pages, e.g. Kuma 2 with MariaDB: enter the slug)"
   elif [ -n "$D_SLUGS" ]; then msg "  Uptime Kuma:  its database is here (status pages: $D_SLUGS), but nothing answers on the usual ports"
   else msg "  Uptime Kuma:  not found"; fi
   detect_proxies
@@ -1262,10 +1232,12 @@ detect_all() {
     [ "$D_ROLE" != route ] && [ "$py" = no ] && { D_ROLE=route; why="no python3 here for the writer"; }
     msg "  Suggested:    $D_ROLE ($why)"
   fi
+  have_tty || msg "  (No terminal: this is only a report. The settings come from the environment or $ENV_FILE.)"
   msg ""
 }
 
-suggest() { # suggest VAR VALUE: VALUE becomes the default answer if VAR has none yet
+suggest() { # suggest VAR VALUE: with a terminal, VALUE becomes the default answer if VAR has none yet
+  have_tty || return 0
   [ -n "${!1:-}" ] || [ -z "$2" ] || printf -v "$1" '%s' "$2"
 }
 
@@ -1287,6 +1259,8 @@ plan() { # what this run is about to change, in plain words
     case "$OUT_ACCESS" in
       new) msg "    - create the folder $(dirname "$OUT")" ;;
       acl) msg "    - let $WRITER_USER write to $(dirname "$OUT") (an ACL on that folder)" ;;
+      chown) [ "$(stat -c %U "$(dirname "$OUT")")" = "$WRITER_USER" ] \
+               || msg "    - give the folder $(dirname "$OUT") to $WRITER_USER (now $OUT_OWNER; --uninstall gives it back)" ;;
       owner) msg "    - run as $WRITER_USER, who owns $(dirname "$OUT")" ;;
     esac
     msg "    - install $WRITER_BIN and the wrist-check-status timer"
@@ -1323,15 +1297,22 @@ confirm_plan() {
   is_yes "$go" || die "stopped, nothing changed. Run again to change the answers."
 }
 
-next_route_steps() {
-  local line="curl -fsSL $REPO_RAW/install.sh"
+next_route_steps() { # after --writer-only: what's left, unless it's already in place
+  local line="curl -fsSL $REPO_RAW/install.sh" tok=""
+  [ -r "$TOKEN_PATH" ] && tok=$(read_token_file "$TOKEN_PATH")
   msg ""
-  msg "Next steps:"
-  msg "  1. On the machine the watch connects to (the one with the public Caddy), add the token check:"
+  if [ -n "${STATUS_URL:-}" ] && [ -n "$tok" ] && ! is_yes "${SKIP_VERIFY:-}"; then
+    if verify_url "$STATUS_URL" "$tok"; then msg "The token check is already in place, so nothing else is needed."; return 0; fi
+    msg ""
+  fi
+  msg "Next steps (skip what you've done already):"
+  msg "  1. If the token check isn't set up yet: on the machine with the reverse proxy the watch connects to, run"
   msg "       $line | sudo bash -s -- --route-only"
-  msg "     If you can't use sudo there:"
+  msg "     or, without sudo there, print the lines to add yourself:"
   msg "       $line | bash -s -- --print-snippet"
-  msg "  2. Then, on that machine, print the URL and token for the watch: the same line with --show."
+  msg "  2. Test it from any machine (it asks for the URL and token if they aren't saved there):"
+  msg "       $line | bash -s -- --verify"
+  msg "  3. To set up a watch: on the proxy machine, the same line with --show prints the URL and token."
 }
 
 proxy_config_text() { # the config text for DOMAIN the script can read, to find a token already in use
@@ -1349,7 +1330,7 @@ ask_existing_token() { # with a terminal, offer to reuse a token instead of maki
   t=$(proxy_config_text | grep -v '^[[:space:]]*#' | sed -n 's/.*"Bearer \([A-Za-z0-9._~+\/=-]\{16,512\}\)".*/\1/p' | head -n1)
   if [ -n "$t" ]; then
     ask keep "Your $(proxy_name) config already uses a token (${t:0:4}...). Keep it, so watches already set up keep working? (yes / no)" "yes"
-    if is_yes "$keep"; then TOKEN=$t; TOKEN_SOURCE="your existing Caddy route"; return 0; fi
+    if is_yes "$keep"; then TOKEN=$t; TOKEN_SOURCE="your existing $(proxy_name) config"; return 0; fi
     t=""
   fi
   printf 'Paste an existing token to keep watches already set up (Enter = make a new one): ' > /dev/tty
@@ -1359,6 +1340,107 @@ ask_existing_token() { # with a terminal, offer to reuse a token instead of maki
   [ -n "$t" ] || return 0
   [[ "$t" =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]] || die "that token isn't valid: 16 to 512 characters of letters, digits and . _ ~ + / = -"
   TOKEN=$t; TOKEN_SOURCE="what you pasted"
+}
+
+# --------------------------------------------------------------------------------------- verify
+
+# http_probe URL BODYFILE: prints the HTTP status (000 = no answer) and saves the body. A token in
+# PROBE_TOKEN goes in the Authorization header; it's passed through the environment or stdin, never as
+# an argument, so it doesn't show up in ps.
+http_probe() {
+  rm -f "$2" "$2.err"
+  if command -v python3 >/dev/null; then
+    python3 -c 'import os, sys, urllib.request, urllib.error
+h = {"User-Agent": "wrist-check-verify", "Cache-Control": "no-cache"}
+if os.environ.get("PROBE_TOKEN"):
+    h["Authorization"] = "Bearer " + os.environ["PROBE_TOKEN"]
+code = 0
+try:
+    with urllib.request.urlopen(urllib.request.Request(sys.argv[1], headers=h), timeout=10) as r:
+        code, body = r.status, r.read(200000)
+except urllib.error.HTTPError as e:
+    code, body = e.code, e.read(2000)
+except Exception as e:
+    body = ("%s: %s" % (type(e).__name__, getattr(e, "reason", e))).encode()
+open(sys.argv[2], "wb").write(body)
+print("%03d" % code)' "$1" "$2" 2>/dev/null || echo 000
+  elif command -v curl >/dev/null; then
+    { [ -n "${PROBE_TOKEN:-}" ] && printf 'header = "Authorization: Bearer %s"\n' "$PROBE_TOKEN"; true; } \
+      | curl -sS -m 10 -K - -H 'Cache-Control: no-cache' -o "$2" -w '%{http_code}' "$1" 2>"$2.err" || true
+  else
+    echo "needs python3 or curl" > "$2"; echo 000
+  fi
+}
+
+status_info() { # status_info BODYFILE: "age<TAB>short<TAB>error" if it's the writer's JSON
+  if command -v python3 >/dev/null; then
+    python3 -c 'import json, sys, time
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert isinstance(d, dict) and isinstance(d.get("updated"), (int, float)) and "short" in d
+print("%d\t%s\t%s" % (time.time() - d["updated"], d["short"], d.get("error", "")))' "$1" 2>/dev/null
+  else
+    local up short
+    up=$(grep -o '"updated": *[0-9]*' "$1" | grep -o '[0-9]*$') || return 1
+    short=$(sed -n 's/.*"short": *"\([^"]*\)".*/\1/p' "$1" | head -n1)
+    printf '%s\t%s\t%s\n' "$(( $(date +%s) - up ))" "$short" "$(grep -q '"error"' "$1" && echo yes)"
+  fi
+}
+
+verify_url() { # verify_url URL TOKEN: 0 if the watch would get a fresh status and others get nothing
+  local url=$1 tok=$2 body code info age short err bad=0
+  tmp_dir; body="$TMP_DIR/probe"
+  msg "Testing $url"
+  code=$(PROBE_TOKEN=$tok http_probe "$url" "$body")
+  case "$code" in
+    200)
+      if info=$(status_info "$body"); then
+        IFS=$'\t' read -r age short err <<< "$info"
+        if [ -n "$err" ]; then msg "  with the token:     answers, but the writer can't read Kuma ($err)"; bad=1
+        elif [ "$age" -gt 300 ]; then
+          msg "  with the token:     answers, but the status is $((age / 60)) minutes old. Is the writer running?"
+          msg "                      On its machine: systemctl status wrist-check-status.timer"; bad=1
+        else msg "  with the token:     OK, \"$short\" (written ${age}s ago)"; fi
+      else
+        msg "  with the token:     answers 200, but not with the status JSON: something else serves this path"; bad=1
+      fi ;;
+    000) msg "  with the token:     no answer ($(cat "$body" "$body.err" 2>/dev/null | head -c 200))"; bad=1 ;;
+    401|403|404)
+      msg "  with the token:     $code. The token check doesn't let this token through (it has another token,"
+      msg "                      or isn't in place or reloaded yet), or the status file isn't there yet."; bad=1 ;;
+    502|503|504) msg "  with the token:     $code: the proxy can't reach the machine with the status file"; bad=1 ;;
+    *) msg "  with the token:     unexpected answer $code"; bad=1 ;;
+  esac
+  code=$(PROBE_TOKEN="" http_probe "$url" "$body")
+  case "$code" in
+    404) msg "  without the token:  OK, 404 (to everyone else there's nothing there)" ;;
+    401|403) msg "  without the token:  $code, refused. Fine, though a 404 wouldn't even show that something is there." ;;
+    200) msg "  without the token:  200! The status can be read WITHOUT the token: check the proxy config."; bad=1 ;;
+    000) msg "  without the token:  no answer" ;;
+    *) msg "  without the token:  $code" ;;
+  esac
+  return "$bad"
+}
+
+verify() {
+  local given=${STATUS_URL:-} tok=""
+  load_env
+  [ -n "$given" ] || status_url
+  [ -n "${STATUS_URL:-}" ] || need STATUS_URL "Status URL to test" "like https://example.com/health/status.json"
+  check STATUS_URL '^https?://[^[:space:]]+$' "a URL like https://example.com/health/status.json"
+  if [ -n "${TOKEN:-}" ]; then tok=$TOKEN
+  elif [ -n "${TOKEN_FILE:-}" ]; then
+    [ -r "$TOKEN_FILE" ] || die "can't read TOKEN_FILE=$TOKEN_FILE"
+    tok=$(read_token_file "$TOKEN_FILE")
+  elif [ -r "$TOKEN_PATH" ]; then tok=$(read_token_file "$TOKEN_PATH")
+  elif have_tty; then
+    printf 'Token (not shown as you type or paste): ' > /dev/tty
+    read -rs tok < /dev/tty || true
+    echo > /dev/tty
+    tok=$(printf '%s' "$tok" | tr -d ' \t\r\n')
+  fi
+  [ -n "$tok" ] || die "no token to test with: run this where it's saved (with sudo), give TOKEN_FILE=<a file holding it>, or run it in a terminal to paste it"
+  if verify_url "$STATUS_URL" "$tok"; then msg "All good: the watch will get the status."
+  else exit 1; fi
 }
 
 # -------------------------------------------------------------------------------------- actions
@@ -1392,7 +1474,11 @@ print_snippet() {
   fi
   [ -n "${TOKEN_SOURCE:-}" ] || { resolve_token; ask_existing_token; }
   local saved=yes old="" n=1
-  save_token || saved=no
+  case "$PROXY" in caddy|nginx) ;; *) load_proxies ;; esac
+  case "${SAVE_TOKEN:-yes}" in
+    [Nn]|[Nn][Oo]|0|false) saved=skip ;;
+    *) save_token || saved=no ;;
+  esac
   [ "$PROXY" = caddy ] && [ -r "$CADDYFILE" ] && [ -n "${DOMAIN:-}" ] && old=$(old_checks)
   if [ "$PROXY" = caddy ] && [ "$ROUTE" = check-only ] && [ -n "${DOMAIN:-}" ] && [ -n "$(handle_blocks)" ]; then
     msg "Warning: in the $DOMAIN part of $CADDYFILE, requests are passed on inside handle/route sections:"
@@ -1408,7 +1494,10 @@ print_snippet() {
     snippet_text
   fi
   msg ""
-  if [ "$saved" = yes ]; then token_note
+  if [ "$saved" = yes ]; then
+    token_note
+    [ "$IS_ROOT" = yes ] || msg "(SAVE_TOKEN=no skips keeping that copy in your home folder; --show and --verify read it.)"
+  elif [ "$saved" = skip ]; then msg "Token not saved anywhere (SAVE_TOKEN=no): it's only in the lines above, so --show can't print it."
   elif [ "$TOKEN_SOURCE" = new ]; then msg "Couldn't save the new token in $TOKEN_PATH: it's only in the snippet."; fi
   msg ""
   msg "Next steps:"
@@ -1419,7 +1508,8 @@ print_snippet() {
       n=$((n + 1))
     fi
     paste_steps "$n"
-    msg "  Then set up the watch: run this script again with --show to print the URL and token."
+    if [ "$saved" = skip ]; then msg "  Then set up the watch with ${STATUS_URL:-the status URL} and the token in those lines."
+    else msg "  Then test it from any machine with --verify, and set up the watch (--show prints the URL and token)."; fi
     [ -n "${STATUS_URL:-}" ] && { ( save_env ) 2>/dev/null || true; }
     return 0
   fi
@@ -1438,23 +1528,35 @@ print_snippet() {
   n=$((n + 1))
   msg "  $n. Check and reload:  caddy validate --config $CADDYFILE --adapter caddyfile && sudo systemctl reload caddy"
   n=$((n + 1))
-  msg "  $n. Set up the watch: run this script again with --show to print the URL and token."
+  if [ "$saved" = skip ]; then
+    msg "  $n. Set up the watch with ${STATUS_URL:-the status URL} and the token in the new lines."
+  else
+    msg "  $n. Test it from any machine: run this script again with --verify."
+    n=$((n + 1))
+    msg "  $n. Set up the watch: run this script again with --show to print the URL and token."
+  fi
   [ -n "${STATUS_URL:-}" ] && { ( save_env ) 2>/dev/null || true; }
   true
 }
 
 install_all() {
   load_env
+  ROLE=${ROLE:-}
   [ "$IS_ROOT" = yes ] || [ "$ROLE" = route ] || is_yes "${DRY_RUN:-}" || die "run as root (sudo), or use --route-only / --print-snippet"
-  msg "Wrist Check server setup"
+  msg "Wrist Check server setup, version $VERSION"
+  if is_yes "${UPGRADE:-}"; then
+    [ -r "$ENV_FILE" ] && [ -n "$ROLE" ] || die "nothing to upgrade here (no settings in $ENV_FILE): run it without --upgrade"
+    NONINTERACTIVE=yes
+    msg "Upgrading with the settings in $ENV_FILE, no questions."
+  fi
   msg ""
   detect_all
-  if [ -z "$ROLE" ]; then
+  if [ -z "$ROLE_FLAG" ] && { [ -z "$ROLE" ] || have_tty; }; then
     have_tty && msg "What should run here?
   all     everything on this machine (Kuma and the reverse proxy are both here)
   writer  only the part that reads Kuma (the watch connects through a proxy on another machine)
   route   only the token check in the reverse proxy (Kuma is on another machine)"
-    ask ROLE "Answer (all / writer / route)" "${D_ROLE:-all}"
+    ask ROLE "Answer (all / writer / route)" "$(have_tty && echo "${D_ROLE:-all}" || echo all)"
   fi
   check ROLE '^(all|writer|route)$' "all, writer or route"
   if [ "$ROLE" != writer ]; then
@@ -1476,7 +1578,10 @@ install_all() {
 
   [ "$ROLE" = route ] || install_writer
 
-  if [ "$ROLE" != writer ] && [ "$PROXY" != caddy ] && [ "$PROXY" != nginx ]; then
+  if [ "$ROLE" != writer ] && [ "$PROXY" != caddy ] && [ "$PROXY" != nginx ] && is_yes "${UPGRADE:-}"; then
+    msg ""
+    msg "The token check in $(proxy_name) was added by hand, so it stays as it is."
+  elif [ "$ROLE" != writer ] && [ "$PROXY" != caddy ] && [ "$PROXY" != nginx ]; then
     # The script doesn't change this proxy itself: print its config and the steps to add it.
     msg ""
     ACTION=print; ROUTE_ASKED=yes; print_snippet
@@ -1488,15 +1593,23 @@ install_all() {
     if [ "$PROXY" = nginx ]; then apply_route_nginx; else apply_route; fi
     msg ""
     token_note "readable by $(id -un) only"
-    msg "Status URL: $STATUS_URL"
+    if ! is_yes "${SKIP_VERIFY:-}"; then
+      msg ""
+      verify_url "$STATUS_URL" "$TOKEN" || {
+        msg "  That was tested from this machine. If the problem is that the writer isn't set up yet, or this"
+        msg "  machine can't reach its own domain, test again later from anywhere: the same line with --verify."
+      }
+    fi
+    is_yes "${UPGRADE:-}" || msg ""
     if [ "$SHOW" = yes ]; then show
-    else msg "Last step, set up the watch: run this script again with --show to print the URL and token."; fi
+    elif ! is_yes "${UPGRADE:-}"; then msg "Last step, set up the watch: run this script again with --show to print the URL and token."; fi
   fi
   if [ "$ROLE" != route ] && [ -n "$D_OTHER_TIMERS" ]; then
     msg ""
     msg "Once the watch shows the right status, turn off the older timer(s): systemctl disable --now $D_OTHER_TIMERS"
   fi
-  [ "$ROLE" = writer ] && next_route_steps
+  [ "$ROLE" = writer ] && ! is_yes "${UPGRADE:-}" && next_route_steps
+  is_yes "${UPGRADE:-}" && msg "" && msg "Upgrade done."
   true
 }
 
@@ -1535,6 +1648,18 @@ rotate() {
   true
 }
 
+# Before the wrist-check user goes: the folder (OUT_ACCESS=chown) and the files the writer made in it
+# go back to the folder's owner, so nothing is left owned by a user that no longer exists.
+give_back() {
+  local dir=$1 to
+  id wrist-check >/dev/null 2>&1 || return 0
+  if [ "${OUT_ACCESS:-}" = chown ] && [ -n "${OUT_OWNER:-}" ]; then to=$OUT_OWNER
+  else to=$(stat -c %U:%G "$dir"); fi
+  [ "${to%%:*}" = wrist-check ] && to="root:root"
+  find "$dir" -maxdepth 1 -user wrist-check -exec chown "$to" {} + 2>/dev/null || true
+  msg "Gave $dir and the writer's files in it back to $to."
+}
+
 uninstall() {
   load_env
   local role=${ROLE_FLAG:-all} todo=() dir
@@ -1543,6 +1668,7 @@ uninstall() {
     todo+=("the status writer: timer, $WRITER_BIN")
     [ "$dir" = "$DATA_DIR" ] && todo+=("$DATA_DIR")
     [ "${OUT_ACCESS:-}" = acl ] && todo+=("the ACL that lets ${WRITER_USER:-wrist-check} write to $dir")
+    [ "${OUT_ACCESS:-}" = chown ] && [ -n "${OUT_OWNER:-}" ] && todo+=("$WRITER_USER's hold on $dir: it goes back to $OUT_OWNER")
     id wrist-check >/dev/null 2>&1 && todo+=("the user wrist-check")
   fi
   if [ "$role" != writer ]; then
@@ -1564,7 +1690,10 @@ uninstall() {
     systemctl daemon-reload 2>/dev/null || true
     [ "${OUT_ACCESS:-}" = acl ] && command -v setfacl >/dev/null && setfacl -x "u:${WRITER_USER:-wrist-check}" "$dir" 2>/dev/null || true
     if [ "$dir" = "$DATA_DIR" ]; then rm -rf "$DATA_DIR"
-    else msg "Left $OUT in place (not this script's folder): delete it yourself if nothing serves it."; fi
+    else
+      give_back "$dir"
+      msg "Left $OUT in place (not this script's folder): delete it yourself if nothing serves it."
+    fi
     id wrist-check >/dev/null 2>&1 && userdel wrist-check 2>/dev/null || true
     msg "Status writer removed."
   fi
@@ -1599,6 +1728,7 @@ remove_self() {
   fi
   rm -f "$self" && msg "Installer removed ($self)."
   [ -n "$USED_LOCAL_WRITER" ] && rm -f "$USED_LOCAL_WRITER"
+  [ -n "$USED_LOCAL_PROXIES" ] && rm -f "$USED_LOCAL_PROXIES"
   true
 }
 
@@ -1614,6 +1744,9 @@ main() {
       --route-only) ROLE_FLAG=route ;;
       --show) SHOW=yes ;;
       --dry-run) DRY_RUN=yes ;;
+      --upgrade) UPGRADE=yes ;;
+      --version) echo "Wrist Check install.sh $VERSION"; exit 0 ;;
+      --verify) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall, --verify"; ACTION=verify ;;
       --print-snippet) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=print ;;
       --rotate) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=rotate ;;
       --uninstall) [ "$ACTION" = install ] || die "pick one of --print-snippet, --rotate, --uninstall"; ACTION=uninstall ;;
@@ -1621,12 +1754,12 @@ main() {
       *) die "unknown option $a (see --help)" ;;
     esac
   done
-  [ -n "$ROLE_FLAG" ] && ROLE=$ROLE_FLAG
-  ROLE=${ROLE:-}
+  [ -n "$ROLE_FLAG" ] && ROLE=$ROLE_FLAG   # otherwise ROLE stays unset, so the saved one can load
   # "--show" on its own prints the URL and token once set up; on a fresh machine it installs and then shows.
   if [ "$ACTION" = install ] && [ "$SHOW" = yes ] && [ -z "$ROLE_FLAG" ] && [ $# -eq 1 ] && [ -r "$ENV_FILE" ]; then ACTION=show; fi
   case "$ACTION" in
     show) show ;;
+    verify) verify ;;
     print) print_snippet ;;
     rotate) rotate ;;
     uninstall) uninstall ;;
@@ -1635,4 +1768,5 @@ main() {
   is_yes "${DRY_RUN:-}" || case "$ACTION" in install|uninstall|rotate) remove_self ;; esac
 }
 
-main "$@"
+# Tests source this file with WRIST_CHECK_SOURCE_ONLY=yes to call single functions.
+[ "${WRIST_CHECK_SOURCE_ONLY:-}" = yes ] || main "$@"

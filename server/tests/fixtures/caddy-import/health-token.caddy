@@ -1,0 +1,6 @@
+# The token check lives in its own file, imported into the site.
+@notoken {
+	path /health/*
+	not header Authorization "Bearer test-token-0123456789abcdef"
+}
+respond @notoken 404

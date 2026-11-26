@@ -1,0 +1,29 @@
+name: Release
+
+# Push a tag like v1.0.0 to publish a release. Its install.sh downloads only that release's
+# kuma-status.py and proxies.sh and refuses them unless their checksums match, so an install can be
+# pinned to code that's been read once. SHA256SUMS covers all three files.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tests
+        run: |
+          bash server/tests/run.sh
+          python3 server/tests/test_writer.py
+      - name: Build the pinned files
+        run: bash server/tests/release.sh "$GITHUB_REF_NAME" dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/install.sh dist/kuma-status.py dist/proxies.sh dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --generate-notes

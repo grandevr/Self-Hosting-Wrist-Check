@@ -1,0 +1,9 @@
+http://example.com {
+	@nobearer {
+		path /health/*
+		not header Authorization "Bearer test-token-0123456789abcdef"
+	}
+	error @nobearer 404
+	root * /srv/www
+	file_server
+}
