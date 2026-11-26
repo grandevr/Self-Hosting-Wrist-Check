@@ -16,6 +16,8 @@ final class Status {
     final String checkedAt;        // "HH:MM": status.json's title (last check / last update)
     /** Working services from the optional "up" array; empty when the server doesn't send it. */
     final List<String> up = new ArrayList<>();
+    /** Categories from the optional "groups" array; empty means show the flat list. */
+    final List<Group> groups = new ArrayList<>();
 
     private Status(Kind kind, List<String> problems, String checkedAt) {
         this.kind = kind;

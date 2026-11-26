@@ -87,6 +87,29 @@ How it's kept safe:
 - The token is stored encrypted with an AES key held in the Android Keystore, never logged, never shown again on the page, and not included in backups.
 - The status URL has to be `https://`.
 
+## Optional: categories
+
+If `status.json` includes a `groups` array, the list screen shows collapsible categories instead of the flat list. A collapsed category shows its name and `UP n • DOWN n` (plus `• SLOW n` when something is slow). Tap it to expand it and see its problems (red/amber) and working services (green). Categories with problems start expanded. Without `groups`, the flat list above is used.
+
+```json
+{
+  "short": "Sonarr DOWN", "title": "20:16", "count": 1,
+  "problems": ["Sonarr DOWN", "Radarr SLOW"],
+  "groups": [
+    {"name": "Media", "problems": ["Sonarr DOWN", "Radarr SLOW"], "up": ["Jellyfin", "Immich"]},
+    {"name": "Infra", "problems": [], "up": ["Caddy", "Uptime Kuma"]}
+  ],
+  "updated": 1795637760
+}
+```
+
+- `name`: the category (for example the Uptime Kuma group name). Put ungrouped monitors in a group like `"Other"`.
+- `problems`: the same `"<Name> DOWN"` / `"<Name> SLOW"` labels as the top-level `problems`, for this category only.
+- `up`: plain names of this category's working services.
+- Keep the top-level `problems` as it is: the complication still reads it.
+
+The status writer from `server/install.sh` fills in `groups` from the groups on your Uptime Kuma status page.
+
 ## Build
 
 Requirements: JDK 17+, Android SDK with platform 36 (Android Studio's SDK is fine; point to it with `ANDROID_HOME` or a `local.properties` containing `sdk.dir=...`). Gradle 9.2.1 and Android Gradle Plugin 9.0.0 come via the wrapper.
@@ -124,7 +147,8 @@ app/src/main/java/uk/debil/status/
   StatusDataSource.java   complication service, builds SHORT_TEXT / LONG_TEXT data
   StatusFetcher.java      HTTP fetch + JSON parsing
   Status.java             status model and wording
-  ProblemsActivity.java   scrollable full list, opened by tapping the complication
+  ProblemsActivity.java   scrollable full list (or categories), opened by tapping the complication
+  Group.java              one category from the optional "groups" field
   Refresh.java            asks Wear OS to update the complication now
   Config.java             URL + token storage (token encrypted with an Android Keystore key)
   SetupActivity.java      setup screen: Wi-Fi, QR code, address and PIN

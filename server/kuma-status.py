@@ -12,7 +12,10 @@ Settings come from environment variables (install.sh puts them in /etc/wrist-che
 
 Output, e.g.:
   {"short":"PKVault DOWN","title":"20:16","count":1,"problems":["PKVault DOWN"],
-   "up":["Immich","Jellyfin"],"updated":1795637760}
+   "up":["Immich","Jellyfin"],
+   "groups":[{"name":"Media","problems":["PKVault DOWN"],"up":["Immich","Jellyfin"]}],
+   "updated":1795637760}
+"groups" follows the groups on the Kuma status page (the watch shows them as categories).
 If Kuma can't be read: "short" is "Kuma DOWN" and an "error" field is present.
 """
 import json
@@ -47,9 +50,10 @@ def build():
         return {"short": "Kuma DOWN", "title": title, "count": 0, "problems": [],
                 "error": type(e).__name__, "updated": now}
 
-    down, slow, up = [], [], []
+    down, slow, up, groups = [], [], [], []
     seen = set()
     for group in page.get("publicGroupList", []):
+        g_down, g_slow, g_up = [], [], []
         for mon in group.get("monitorList", []):
             mid, name = mon.get("id"), (mon.get("name") or "").strip()
             if not name or mid in seen:
@@ -61,18 +65,25 @@ def build():
             last = max(history, key=lambda b: b.get("time") or "")
             status, ping = last.get("status"), last.get("ping")
             if status == DOWN:
-                down.append(name + " DOWN")
+                g_down.append(name + " DOWN")
             elif status == PENDING:
-                slow.append(name + " SLOW")  # retrying: not down yet, but not fine either
+                g_slow.append(name + " SLOW")  # retrying: not down yet, but not fine either
             elif status == UP and SLOW_MS and isinstance(ping, (int, float)) and ping > SLOW_MS:
-                slow.append(name + " SLOW")
+                g_slow.append(name + " SLOW")
             elif status == UP:
-                up.append(name)
+                g_up.append(name)
             # MAINTENANCE: left out on purpose
+        down += g_down
+        slow += g_slow
+        up += g_up
+        if g_down or g_slow or g_up:
+            groups.append({"name": (group.get("name") or "").strip() or "Other",
+                           "problems": g_down + g_slow, "up": g_up})
 
     problems = down + slow  # most important first
     return {"short": problems[0] if problems else "ALL UP", "title": title,
-            "count": len(problems), "problems": problems, "up": up, "updated": now}
+            "count": len(problems), "problems": problems, "up": up, "groups": groups,
+            "updated": now}
 
 
 def write_atomic(path, data):
